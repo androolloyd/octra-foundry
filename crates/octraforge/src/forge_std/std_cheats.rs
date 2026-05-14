@@ -6,7 +6,7 @@
 //!   - `hoax(addr, balance)` = `deal(addr, balance)` + `prank(addr)`
 //!   - `makeAddr("label")` = create labeled wallet, return address
 
-use octravpn_core::address::Address;
+use octra_core::address::Address;
 
 use crate::{wallet::Wallet, ForgeCtx};
 

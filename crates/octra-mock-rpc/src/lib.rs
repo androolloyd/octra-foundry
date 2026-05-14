@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use octravpn_core::coverage as cov;
+use octra_core::coverage as cov;
 
 mod coverage {
     pub(crate) fn record(method: &str, branch: &str) {

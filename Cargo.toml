@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/octra-core",
     "crates/octraforge",
     "crates/octra-mock-rpc",
 ]
@@ -57,6 +58,7 @@ rust-version = "1.75"
 [workspace.dependencies]
 anyhow      = "1"
 axum        = "0.7"
+bs58        = "0.5"
 clap        = { version = "4", features = ["derive", "env"] }
 curve25519-dalek = { version = "4", features = ["serde", "digest", "rand_core"] }
 ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
@@ -66,6 +68,7 @@ proptest    = "1"
 rand        = "0.8"
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
+serde_with  = "3"
 sha2        = "0.10"
 tempfile    = "3"
 thiserror   = "1"
@@ -73,3 +76,7 @@ tokio       = { version = "1", features = ["full"] }
 tower-http  = "0.6"
 tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+zeroize     = { version = "1", features = ["derive"] }
+
+# Internal crates
+octra-core  = { path = "crates/octra-core" }

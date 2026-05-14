@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use octravpn_core::{
+use octra_core::{
     address::Address,
     sig::{KeyPair, Signature},
 };
@@ -110,7 +110,7 @@ mod tests {
         let kp = KeyPair::generate();
         let msg = b"forge sign test";
         let sig = sign(&kp, msg);
-        octravpn_core::sig::verify(&kp.public, msg, &sig).unwrap();
+        octra_core::sig::verify(&kp.public, msg, &sig).unwrap();
     }
 
     #[test]

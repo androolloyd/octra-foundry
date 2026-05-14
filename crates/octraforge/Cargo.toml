@@ -12,7 +12,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-octravpn-core      = { path = "../../../octra/crates/octravpn-core" }
+octra-core         = { workspace = true }
 octra-mock-rpc     = { path = "../octra-mock-rpc" }
 
 curve25519-dalek   = { workspace = true }

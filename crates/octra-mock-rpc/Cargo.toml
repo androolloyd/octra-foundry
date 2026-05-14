@@ -16,7 +16,7 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-octravpn-core = { path = "../../../octra/crates/octravpn-core" }
+octra-core = { workspace = true }
 
 anyhow = { workspace = true }
 axum = { workspace = true }

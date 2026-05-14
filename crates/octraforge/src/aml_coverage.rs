@@ -1,7 +1,7 @@
 //! AML branch coverage report — Foundry `forge coverage` equivalent.
 //!
 //! Runtime branch hits are recorded by the mock chain via
-//! `octravpn_core::coverage`. This module walks `program/main.aml`
+//! `octra_core::coverage`. This module walks `program/main.aml`
 //! statically, enumerates the branches we expect tests to exercise, and
 //! pairs the two to produce a coverage percentage per method.
 
@@ -11,7 +11,7 @@ use std::{
     path::Path,
 };
 
-pub use octravpn_core::coverage::{enable, finish, record, Recorder};
+pub use octra_core::coverage::{enable, finish, record, Recorder};
 
 #[derive(Debug, Clone)]
 pub struct CoverageReport {
