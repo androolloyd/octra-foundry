@@ -15,12 +15,7 @@ fn deploy_with_validator(forge: &mut ForgeCtx) {
     forge.become_octra_validator(VALIDATOR);
     forge.prank(VALIDATOR);
     forge
-        .call_register_endpoint_simple(
-            "1.2.3.4:51820",
-            &"de".repeat(32),
-            "eu-west",
-            100,
-        )
+        .call_register_endpoint_simple("1.2.3.4:51820", &"de".repeat(32), "eu-west", 100)
         .expect("register endpoint");
 }
 
@@ -49,7 +44,9 @@ octra_test!(wallet_can_register_two_devices, |forge| {
 octra_test!(device_cannot_be_attached_to_two_wallets, |forge| {
     deploy_with_validator(&mut forge);
     forge.prank(WALLET);
-    forge.call_register_device(DEVICE_PHONE).expect("first attach");
+    forge
+        .call_register_device(DEVICE_PHONE)
+        .expect("first attach");
 
     // Re-attach to a *different* wallet should revert.
     forge.prank(OTHER_WALLET);
@@ -61,7 +58,9 @@ octra_test!(device_cannot_be_attached_to_two_wallets, |forge| {
 octra_test!(idempotent_self_register_is_noop, |forge| {
     deploy_with_validator(&mut forge);
     forge.prank(WALLET);
-    forge.call_register_device(DEVICE_PHONE).expect("first attach");
+    forge
+        .call_register_device(DEVICE_PHONE)
+        .expect("first attach");
     // Same wallet re-registering is a no-op (returns Ok with no events).
     forge.prank(WALLET);
     let r = forge.call_register_device(DEVICE_PHONE).expect("noop");

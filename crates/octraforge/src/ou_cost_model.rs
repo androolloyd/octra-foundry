@@ -23,27 +23,78 @@ struct Op {
 
 const OPS: &[Op] = &[
     // Cryptography is by far the most expensive class of host call.
-    Op { pattern: "verify_ed25519_acct", weight: 2_500 },
-    Op { pattern: "verify_ed25519",      weight: 2_000 },
-    Op { pattern: "pedersen_verify_open", weight: 3_500 },
-    Op { pattern: "pedersen_verify_eq",   weight: 3_500 },
-    Op { pattern: "pedersen_mul_scalar_g", weight: 1_500 },
-    Op { pattern: "pedersen_mul_scalar_h", weight: 1_500 },
-    Op { pattern: "pedersen_add",         weight:   400 },
-    Op { pattern: "pedersen_zero",        weight:   100 },
-    Op { pattern: "sha256",               weight:   300 },
+    Op {
+        pattern: "verify_ed25519_acct",
+        weight: 2_500,
+    },
+    Op {
+        pattern: "verify_ed25519",
+        weight: 2_000,
+    },
+    Op {
+        pattern: "pedersen_verify_open",
+        weight: 3_500,
+    },
+    Op {
+        pattern: "pedersen_verify_eq",
+        weight: 3_500,
+    },
+    Op {
+        pattern: "pedersen_mul_scalar_g",
+        weight: 1_500,
+    },
+    Op {
+        pattern: "pedersen_mul_scalar_h",
+        weight: 1_500,
+    },
+    Op {
+        pattern: "pedersen_add",
+        weight: 400,
+    },
+    Op {
+        pattern: "pedersen_zero",
+        weight: 100,
+    },
+    Op {
+        pattern: "sha256",
+        weight: 300,
+    },
     // Octra-protocol-validator query (chain-side lookup).
-    Op { pattern: "is_octra_validator",   weight:   500 },
+    Op {
+        pattern: "is_octra_validator",
+        weight: 500,
+    },
     // State changes / I/O.
-    Op { pattern: "emit",                 weight:   200 },
-    Op { pattern: "transfer",             weight:   400 },
-    Op { pattern: "emit_private_transfer", weight: 1_000 },
-    Op { pattern: "mul_div_safe",         weight:   150 },
+    Op {
+        pattern: "emit",
+        weight: 200,
+    },
+    Op {
+        pattern: "transfer",
+        weight: 400,
+    },
+    Op {
+        pattern: "emit_private_transfer",
+        weight: 1_000,
+    },
+    Op {
+        pattern: "mul_div_safe",
+        weight: 150,
+    },
     // Control flow we expect to recur per iteration.
-    Op { pattern: "while ",               weight:   200 },
-    Op { pattern: "require(",             weight:    20 },
+    Op {
+        pattern: "while ",
+        weight: 200,
+    },
+    Op {
+        pattern: "require(",
+        weight: 20,
+    },
     // Loop body fixed cost — captures O(hops) work in settle_session.
-    Op { pattern: "split_bps",            weight:    30 },
+    Op {
+        pattern: "split_bps",
+        weight: 30,
+    },
 ];
 
 /// Strip line and block comments without changing line offsets, so

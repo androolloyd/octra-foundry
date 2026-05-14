@@ -18,13 +18,28 @@ type InvariantFn = fn(&ForgeCtx) -> InvariantResult;
 pub fn check_all(ctx: &ForgeCtx) -> InvariantResult {
     let checks: &[(&str, InvariantFn)] = &[
         ("active_endpoints_have_stake", active_endpoints_have_stake),
-        ("slashed_endpoints_have_zero_stake", slashed_endpoints_have_zero_stake),
-        ("unbonding_excludes_live_stake", unbonding_excludes_live_stake),
+        (
+            "slashed_endpoints_have_zero_stake",
+            slashed_endpoints_have_zero_stake,
+        ),
+        (
+            "unbonding_excludes_live_stake",
+            unbonding_excludes_live_stake,
+        ),
         ("session_status_is_valid", session_status_is_valid),
-        ("settled_sessions_have_recorded_exit", settled_sessions_have_recorded_exit),
-        ("active_endpoints_view_matches_state", active_endpoints_view_matches_state),
+        (
+            "settled_sessions_have_recorded_exit",
+            settled_sessions_have_recorded_exit,
+        ),
+        (
+            "active_endpoints_view_matches_state",
+            active_endpoints_view_matches_state,
+        ),
         ("tailnet_owner_is_member", tailnet_owner_is_member),
-        ("session_exits_are_configured_for_tailnet", session_exits_are_configured_for_tailnet),
+        (
+            "session_exits_are_configured_for_tailnet",
+            session_exits_are_configured_for_tailnet,
+        ),
     ];
     let mut errs = Vec::new();
     for (name, f) in checks {
@@ -104,10 +119,7 @@ pub fn session_status_is_valid(ctx: &ForgeCtx) -> InvariantResult {
     let s = ctx.app.state.read();
     for (sid, sess) in &s.sessions {
         if sess.status > 2 {
-            return Err(format!(
-                "session {sid} has invalid status {}",
-                sess.status
-            ));
+            return Err(format!("session {sid} has invalid status {}", sess.status));
         }
     }
     Ok(())
@@ -165,10 +177,7 @@ pub fn tailnet_owner_is_member(ctx: &ForgeCtx) -> InvariantResult {
     let s = ctx.app.state.read();
     for (tid, t) in &s.tailnets {
         if !t.members.contains(&t.owner) {
-            return Err(format!(
-                "tailnet {tid}: owner {} not in members",
-                t.owner
-            ));
+            return Err(format!("tailnet {tid}: owner {} not in members", t.owner));
         }
     }
     Ok(())

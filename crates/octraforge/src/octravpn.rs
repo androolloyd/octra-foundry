@@ -14,7 +14,8 @@ pub const DEFAULT_CALLER: &str = "octFORGEDEFAULTCALLER000000000000000000001";
 /// Stand-in HFHE pubkey + zero-ciphertext used by tests. Real Octra
 /// keys are produced by the operator's wallet; the mock just stores
 /// the bytes opaquely.
-pub const MOCK_HFHE_PUBKEY: &str = "fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe";
+pub const MOCK_HFHE_PUBKEY: &str =
+    "fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe";
 pub const MOCK_INITIAL_ENC_ZERO: &str =
     "00000000000000000000000000000000000000000000000000000000000000ab";
 
@@ -36,7 +37,8 @@ impl ForgeCtx {
     /// keeping both turn-ons here keeps existing tests un-churned.
     pub fn become_octra_validator(&mut self, addr: &str) {
         self.app.add_octra_validator(addr);
-        self.app.seed_endpoint_stake(addr, octra_mock_rpc::MIN_ENDPOINT_STAKE);
+        self.app
+            .seed_endpoint_stake(addr, octra_mock_rpc::MIN_ENDPOINT_STAKE);
     }
 
     /// Seed `addr` with `amount` OU of operator stake, skipping the

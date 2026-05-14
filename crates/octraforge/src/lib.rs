@@ -12,7 +12,6 @@
 pub mod aml_coverage;
 pub mod aml_invariants;
 pub mod cheatcodes;
-pub mod ou_cost_model;
 pub mod forge_std;
 pub mod fork;
 pub mod fs;
@@ -22,6 +21,7 @@ pub mod macros;
 pub mod mock;
 pub mod octravpn;
 pub mod ou;
+pub mod ou_cost_model;
 pub mod wallet;
 
 use std::sync::Arc;
@@ -134,11 +134,7 @@ impl ForgeCtx {
         self.pranked_caller = Some(addr.into());
     }
 
-    pub fn prank_with_origin(
-        &mut self,
-        caller: impl Into<String>,
-        origin: impl Into<String>,
-    ) {
+    pub fn prank_with_origin(&mut self, caller: impl Into<String>, origin: impl Into<String>) {
         self.pranked_caller = Some(caller.into());
         self.pranked_origin = Some(origin.into());
     }
@@ -216,10 +212,7 @@ impl ForgeCtx {
     ) {
         self.expectations.push(Expectation::EmitFields {
             name: name.into(),
-            fields: fields
-                .into_iter()
-                .map(|(k, v)| (k.into(), v))
-                .collect(),
+            fields: fields.into_iter().map(|(k, v)| (k.into(), v)).collect(),
         });
     }
 
@@ -318,11 +311,7 @@ impl ForgeCtx {
         });
     }
 
-    pub fn mock_submit_revert(
-        &mut self,
-        method: impl Into<String>,
-        message: impl Into<String>,
-    ) {
+    pub fn mock_submit_revert(&mut self, method: impl Into<String>, message: impl Into<String>) {
         self.mocks.push(MockEntry {
             method: method.into(),
             kind: MockKind::SubmitRevert {
@@ -338,11 +327,7 @@ impl ForgeCtx {
         });
     }
 
-    pub fn mock_view_revert(
-        &mut self,
-        method: impl Into<String>,
-        message: impl Into<String>,
-    ) {
+    pub fn mock_view_revert(&mut self, method: impl Into<String>, message: impl Into<String>) {
         self.mocks.push(MockEntry {
             method: method.into(),
             kind: MockKind::ViewRevert {

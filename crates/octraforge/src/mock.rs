@@ -52,7 +52,10 @@ impl MockTable {
             if e.method != method {
                 continue;
             }
-            if matches!(e.kind, MockKind::SubmitOk { .. } | MockKind::SubmitRevert { .. }) {
+            if matches!(
+                e.kind,
+                MockKind::SubmitOk { .. } | MockKind::SubmitRevert { .. }
+            ) {
                 return Some(&e.kind);
             }
         }
@@ -65,7 +68,10 @@ impl MockTable {
             if e.method != method {
                 continue;
             }
-            if matches!(e.kind, MockKind::ViewOk { .. } | MockKind::ViewRevert { .. }) {
+            if matches!(
+                e.kind,
+                MockKind::ViewOk { .. } | MockKind::ViewRevert { .. }
+            ) {
                 return Some(&e.kind);
             }
         }

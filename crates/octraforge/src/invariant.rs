@@ -26,9 +26,7 @@ pub fn run_invariant(
         for step_idx in 0..steps_per_run {
             step(ctx, step_idx);
             if let Err(e) = check(ctx) {
-                panic!(
-                    "invariant violated on run {run}, step {step_idx}: {e}"
-                );
+                panic!("invariant violated on run {run}, step {step_idx}: {e}");
             }
         }
         ctx.revert_to(snap);

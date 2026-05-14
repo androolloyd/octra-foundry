@@ -76,11 +76,7 @@ pub fn report(rec: &Recorder, aml_source: &str) -> CoverageReport {
     let mut total_hits = 0;
     let mut total_branches = 0;
     for (method, branches) in static_branches {
-        let hit: BTreeSet<String> = rec
-            .hit
-            .get(&method)
-            .cloned()
-            .unwrap_or_default();
+        let hit: BTreeSet<String> = rec.hit.get(&method).cloned().unwrap_or_default();
         let branches_hit = branches.iter().filter(|b| hit.contains(*b)).count();
         let missing: Vec<String> = branches
             .iter()

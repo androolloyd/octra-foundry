@@ -34,10 +34,10 @@ mod tests {
     #[test]
     fn bound_clamps() {
         // range = max - min + 1 = 6
-        assert_eq!(bound(0, 5, 10), 5);    // 0 % 6 = 0 → 5
-        assert_eq!(bound(5, 5, 10), 10);   // 5 % 6 = 5 → 10
-        assert_eq!(bound(6, 5, 10), 5);    // 6 % 6 = 0 → 5
-        assert_eq!(bound(11, 5, 10), 10);  // 11 % 6 = 5 → 10
+        assert_eq!(bound(0, 5, 10), 5); // 0 % 6 = 0 → 5
+        assert_eq!(bound(5, 5, 10), 10); // 5 % 6 = 5 → 10
+        assert_eq!(bound(6, 5, 10), 5); // 6 % 6 = 0 → 5
+        assert_eq!(bound(11, 5, 10), 10); // 11 % 6 = 5 → 10
     }
 
     #[test]

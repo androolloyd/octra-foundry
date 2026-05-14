@@ -372,11 +372,7 @@ fn octra_submit(app: &AppState, params: &Value) -> Result<Value, String> {
 
 // ------------------------ device handlers ------------------------
 
-fn apply_register_device(
-    app: &AppState,
-    tx: &Value,
-    from: &str,
-) -> Result<Vec<Value>, String> {
+fn apply_register_device(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
     let p = tx
         .get("params")
         .and_then(|x| x.as_array())
@@ -401,11 +397,7 @@ fn apply_register_device(
     })])
 }
 
-fn apply_revoke_device(
-    app: &AppState,
-    tx: &Value,
-    from: &str,
-) -> Result<Vec<Value>, String> {
+fn apply_revoke_device(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
     let p = tx
         .get("params")
         .and_then(|x| x.as_array())
@@ -432,11 +424,7 @@ fn apply_revoke_device(
 
 // ------------------------ endpoint handlers ------------------------
 
-fn apply_register_endpoint(
-    app: &AppState,
-    tx: &Value,
-    from: &str,
-) -> Result<Vec<Value>, String> {
+fn apply_register_endpoint(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
     let p = tx
         .get("params")
         .and_then(|x| x.as_array())
@@ -558,11 +546,7 @@ fn apply_retire_endpoint(app: &AppState, from: &str) -> Result<Vec<Value>, Strin
 
 // ------------------------- stake / slashing handlers -------------------------
 
-fn apply_bond_endpoint(
-    app: &AppState,
-    tx: &Value,
-    from: &str,
-) -> Result<Vec<Value>, String> {
+fn apply_bond_endpoint(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
     let amount = tx
         .get("value")
         .and_then(serde_json::Value::as_u64)
@@ -638,11 +622,7 @@ fn apply_finalize_unbond(app: &AppState, from: &str) -> Result<Vec<Value>, Strin
 /// Governance slash. Replaces in-AML cryptographic-evidence slashing.
 /// Only the program owner may call. Off-chain evidence verification
 /// is the owner's responsibility (`octravpn slash-evidence verify`).
-fn apply_gov_slash_operator(
-    app: &AppState,
-    tx: &Value,
-    from: &str,
-) -> Result<Vec<Value>, String> {
+fn apply_gov_slash_operator(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
     let p = tx
         .get("params")
         .and_then(|x| x.as_array())
@@ -663,15 +643,15 @@ fn apply_gov_slash_operator(
         return Err("already slashed".into());
     }
     let live = s.endpoint_stake.get(&operator).copied().unwrap_or(0);
-    let unb = s.endpoint_unbonding.get(&operator).map_or(0, |(amt, _)| *amt);
+    let unb = s
+        .endpoint_unbonding
+        .get(&operator)
+        .map_or(0, |(amt, _)| *amt);
     let total = live.checked_add(unb).ok_or("stake overflow")?;
     if total == 0 {
         return Err("no stake to slash".into());
     }
-    let burn_amt = total
-        .checked_mul(SLASH_BURN_BPS)
-        .ok_or("overflow burn")?
-        / 10_000;
+    let burn_amt = total.checked_mul(SLASH_BURN_BPS).ok_or("overflow burn")? / 10_000;
     let bounty_amt = total - burn_amt;
 
     s.endpoint_stake.insert(operator.clone(), 0);
@@ -709,11 +689,7 @@ fn apply_create_tailnet(
         .get("params")
         .and_then(|x| x.as_array())
         .ok_or("params")?;
-    let acl_policy = p
-        .first()
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
+    let acl_policy = p.first().and_then(|x| x.as_str()).unwrap_or("").to_string();
     let deposit = tx
         .get("value")
         .and_then(serde_json::Value::as_u64)
@@ -803,11 +779,7 @@ fn apply_remove_member(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Val
     })])
 }
 
-fn apply_deposit_to_tailnet(
-    app: &AppState,
-    tx: &Value,
-    _from: &str,
-) -> Result<Vec<Value>, String> {
+fn apply_deposit_to_tailnet(app: &AppState, tx: &Value, _from: &str) -> Result<Vec<Value>, String> {
     let p = tx
         .get("params")
         .and_then(|x| x.as_array())
@@ -905,7 +877,9 @@ fn apply_open_session(
     let t = s.tailnets.get_mut(&tid).ok_or("tailnet not found")?;
     coverage::record("open_session", "require[2]"); // member check
     let direct = t.members.contains(from);
-    let via_device = device_owner.as_deref().is_some_and(|w| t.members.contains(w));
+    let via_device = device_owner
+        .as_deref()
+        .is_some_and(|w| t.members.contains(w));
     if !direct && !via_device {
         return Err("not a member".into());
     }
@@ -922,12 +896,8 @@ fn apply_open_session(
         return Err("treasury insufficient".into());
     }
     coverage::record("open_session", "require[6]"); // exit active (verified below)
-    let exit_has_stake = s
-        .endpoint_stake
-        .get(&exit_addr)
-        .copied()
-        .unwrap_or(0)
-        >= MIN_ENDPOINT_STAKE;
+    let exit_has_stake =
+        s.endpoint_stake.get(&exit_addr).copied().unwrap_or(0) >= MIN_ENDPOINT_STAKE;
     let exit_slashed = s.endpoint_slashed.contains(&exit_addr);
     let exit_active_ep = s.endpoints.get(&exit_addr).is_some_and(|e| e.active);
     if !exit_active_ep || exit_slashed || !exit_has_stake {
@@ -984,13 +954,12 @@ fn apply_settle_claim(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Valu
         if sess.exit != from {
             return Err("not the session's exit operator".into());
         }
-        let ep = s.endpoints.get(&sess.exit).ok_or("operator not registered")?;
-        let has_stake = s
-            .endpoint_stake
+        let ep = s
+            .endpoints
             .get(&sess.exit)
-            .copied()
-            .unwrap_or(0)
-            >= MIN_ENDPOINT_STAKE;
+            .ok_or("operator not registered")?;
+        let has_stake =
+            s.endpoint_stake.get(&sess.exit).copied().unwrap_or(0) >= MIN_ENDPOINT_STAKE;
         let slashed = s.endpoint_slashed.contains(&sess.exit);
         if !ep.active || slashed || !has_stake {
             return Err("operator inactive".into());
@@ -1007,15 +976,9 @@ fn apply_settle_claim(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Valu
         // Slash atomically + refund the session deposit (no settlement).
         coverage::record("settle_claim", "equivocation");
         let live = s.endpoint_stake.get(from).copied().unwrap_or(0);
-        let unb = s
-            .endpoint_unbonding
-            .get(from)
-            .map_or(0, |(amt, _)| *amt);
+        let unb = s.endpoint_unbonding.get(from).map_or(0, |(amt, _)| *amt);
         let total = live.checked_add(unb).ok_or("overflow")?;
-        let burn_amt = total
-            .checked_mul(SLASH_BURN_BPS)
-            .ok_or("overflow burn")?
-            / 10_000;
+        let burn_amt = total.checked_mul(SLASH_BURN_BPS).ok_or("overflow burn")? / 10_000;
         let bounty_amt = total - burn_amt;
         s.endpoint_stake.insert(from.to_string(), 0);
         s.endpoint_unbonding.remove(from);
@@ -1068,11 +1031,7 @@ fn apply_settle_claim(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Valu
 /// Client-side `settle_confirm`. Only the session opener can call.
 /// On match → settlement applies. On mismatch → public dispute is
 /// recorded; settlement does NOT apply.
-fn apply_settle_confirm(
-    app: &AppState,
-    tx: &Value,
-    from: &str,
-) -> Result<Vec<Value>, String> {
+fn apply_settle_confirm(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
     let p = tx
         .get("params")
         .and_then(|x| x.as_array())
@@ -1089,16 +1048,10 @@ fn apply_settle_confirm(
         if sess.opener != from {
             return Err("not the session opener".into());
         }
-        let (ob, _) = sess
-            .operator_claim
-            .ok_or("operator has not claimed yet")?;
+        let (ob, _) = sess.operator_claim.ok_or("operator has not claimed yet")?;
         let ep = s.endpoints.get(&sess.exit).ok_or("operator missing")?;
-        let has_stake = s
-            .endpoint_stake
-            .get(&sess.exit)
-            .copied()
-            .unwrap_or(0)
-            >= MIN_ENDPOINT_STAKE;
+        let has_stake =
+            s.endpoint_stake.get(&sess.exit).copied().unwrap_or(0) >= MIN_ENDPOINT_STAKE;
         let slashed = s.endpoint_slashed.contains(&sess.exit);
         if !ep.active || slashed || !has_stake {
             return Err("operator inactive".into());
@@ -1209,11 +1162,7 @@ fn apply_precommit_join_token(
     })])
 }
 
-fn apply_redeem_join_token(
-    app: &AppState,
-    tx: &Value,
-    from: &str,
-) -> Result<Vec<Value>, String> {
+fn apply_redeem_join_token(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
     let p = tx
         .get("params")
         .and_then(|x| x.as_array())
@@ -1331,11 +1280,7 @@ fn apply_claim_earnings(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Va
         .and_then(|x| x.as_array())
         .ok_or("params")?;
     let claimed = p[0].as_u64().unwrap_or(0);
-    let proof = p
-        .get(1)
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
+    let proof = p.get(1).and_then(|x| x.as_str()).unwrap_or("").to_string();
 
     if claimed == 0 {
         return Err("amount>0".into());
@@ -1362,11 +1307,7 @@ fn apply_claim_earnings(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Va
     })])
 }
 
-fn apply_withdraw_treasury(
-    app: &AppState,
-    tx: &Value,
-    from: &str,
-) -> Result<Vec<Value>, String> {
+fn apply_withdraw_treasury(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
     let p = tx
         .get("params")
         .and_then(|x| x.as_array())
@@ -1423,8 +1364,7 @@ fn contract_call(app: &AppState, params: &Value) -> Result<Value, String> {
                 .filter(|e| {
                     e.active
                         && !s.endpoint_slashed.contains(&e.addr)
-                        && s.endpoint_stake.get(&e.addr).copied().unwrap_or(0)
-                            >= MIN_ENDPOINT_STAKE
+                        && s.endpoint_stake.get(&e.addr).copied().unwrap_or(0) >= MIN_ENDPOINT_STAKE
                 })
                 .map(|e| e.addr.clone())
                 .collect();
@@ -1482,7 +1422,10 @@ fn contract_call(app: &AppState, params: &Value) -> Result<Value, String> {
             Ok(json!(s.endpoint_slashed.contains(addr)))
         }
         "get_tailnet" => {
-            let tid = pp.first().and_then(serde_json::Value::as_u64).ok_or("tailnet_id u64")?;
+            let tid = pp
+                .first()
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("tailnet_id u64")?;
             let s = app.state.read();
             match s.tailnets.get(&tid) {
                 Some(t) => Ok(json!({
@@ -1497,7 +1440,10 @@ fn contract_call(app: &AppState, params: &Value) -> Result<Value, String> {
             }
         }
         "is_tailnet_member" => {
-            let tid = pp.first().and_then(serde_json::Value::as_u64).ok_or("tailnet_id u64")?;
+            let tid = pp
+                .first()
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("tailnet_id u64")?;
             let addr = pp.get(1).and_then(|x| x.as_str()).ok_or("addr")?;
             let s = app.state.read();
             Ok(json!(s
@@ -1523,7 +1469,10 @@ fn contract_call(app: &AppState, params: &Value) -> Result<Value, String> {
             ))
         }
         "is_tailnet_exit" => {
-            let tid = pp.first().and_then(serde_json::Value::as_u64).ok_or("tailnet_id u64")?;
+            let tid = pp
+                .first()
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("tailnet_id u64")?;
             let addr = pp.get(1).and_then(|x| x.as_str()).ok_or("addr")?;
             let s = app.state.read();
             Ok(json!(s
@@ -1532,7 +1481,10 @@ fn contract_call(app: &AppState, params: &Value) -> Result<Value, String> {
                 .is_some_and(|t| t.exits.contains(addr))))
         }
         "get_session" => {
-            let sid = pp.first().and_then(serde_json::Value::as_u64).ok_or("sid u64")?;
+            let sid = pp
+                .first()
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("sid u64")?;
             let s = app.state.read();
             match s.sessions.get(&sid) {
                 Some(sess) => Ok(json!({

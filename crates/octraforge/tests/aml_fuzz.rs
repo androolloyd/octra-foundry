@@ -80,9 +80,7 @@ fn fuzz_random_aml_call_sequences_preserve_invariants() {
         let _ = run_one_op(&mut ctx, &mut fz, &mut rng, op);
         // Verify all invariants hold after every step.
         aml_invariants::check_all(&ctx).unwrap_or_else(|e| {
-            panic!(
-                "invariant violated at step {step} (seed={seed}, op={op}): {e}"
-            );
+            panic!("invariant violated at step {step} (seed={seed}, op={op}): {e}");
         });
     }
 }
@@ -149,11 +147,7 @@ fn op_create_tailnet(
     Ok(())
 }
 
-fn op_add_member(
-    ctx: &mut ForgeCtx,
-    fz: &mut FuzzState,
-    rng: &mut StdRng,
-) -> Result<(), String> {
+fn op_add_member(ctx: &mut ForgeCtx, fz: &mut FuzzState, rng: &mut StdRng) -> Result<(), String> {
     if fz.tailnets.is_empty() {
         return Ok(());
     }
@@ -189,11 +183,7 @@ fn op_configure_exit(
     Ok(())
 }
 
-fn op_open_session(
-    ctx: &mut ForgeCtx,
-    fz: &mut FuzzState,
-    rng: &mut StdRng,
-) -> Result<(), String> {
+fn op_open_session(ctx: &mut ForgeCtx, fz: &mut FuzzState, rng: &mut StdRng) -> Result<(), String> {
     if fz.tailnets.is_empty() || fz.registered.is_empty() {
         return Ok(());
     }

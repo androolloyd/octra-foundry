@@ -99,9 +99,7 @@ pub fn assert_approx_eq_rel(a: u64, b: u64, max_rel_bps: u64) {
     let base = std::cmp::max(a, b).max(1);
     let rel = diff.saturating_mul(10_000) / base;
     if rel > max_rel_bps {
-        panic!(
-            "assertApproxEqRel failed: |{a} - {b}| / max(a,b) * 10000 = {rel} > {max_rel_bps}"
-        );
+        panic!("assertApproxEqRel failed: |{a} - {b}| / max(a,b) * 10000 = {rel} > {max_rel_bps}");
     }
 }
 

@@ -14,36 +14,51 @@ use std::path::PathBuf;
 
 const SNAPSHOT_FILE: &str = "ou-snapshot.txt";
 
-fn workspace_root() -> PathBuf {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    std::path::Path::new(&manifest)
+/// Foundry doesn't ship its own AML; this snapshot tracks the sibling
+/// `octra/` AML so OU-cost drift is visible to anyone running the
+/// foundry workspace tests. If neither `OCTRAVPN_AML_SOURCE_DIR` is
+/// set nor a sibling `../octra/` exists, the test skips.
+fn octra_root() -> Option<PathBuf> {
+    if let Ok(d) = std::env::var("OCTRAVPN_AML_SOURCE_DIR") {
+        return Some(PathBuf::from(d));
+    }
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let foundry_root = std::path::Path::new(&manifest)
         .ancestors()
-        .nth(2)
-        .unwrap()
-        .to_path_buf()
+        .nth(2)?
+        .to_path_buf();
+    let sibling = foundry_root.parent()?.join("octra");
+    sibling.exists().then_some(sibling)
 }
 
-fn read_program_source() -> String {
-    let p = workspace_root().join("program").join("main.aml");
+fn read_program_source(root: &std::path::Path) -> String {
+    let p = root.join("program").join("main.aml");
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
-fn snapshot_path() -> PathBuf {
-    workspace_root().join(SNAPSHOT_FILE)
+fn snapshot_path(root: &std::path::Path) -> PathBuf {
+    root.join(SNAPSHOT_FILE)
 }
 
 #[test]
 fn ou_snapshot_matches_committed_file() {
-    let src = read_program_source();
+    let Some(root) = octra_root() else {
+        eprintln!(
+            "skipping ou_snapshot: no sibling ../octra checkout and \
+             OCTRAVPN_AML_SOURCE_DIR unset"
+        );
+        return;
+    };
+    let src = read_program_source(&root);
     let live = octraforge::ou_cost_model::estimate_program_costs(&src);
     let live_text = octraforge::ou_cost_model::format_snapshot(&live);
 
     if std::env::var("OCTRAVPN_OU_UPDATE_SNAPSHOT").as_deref() == Ok("1") {
-        std::fs::write(snapshot_path(), &live_text).unwrap();
+        std::fs::write(snapshot_path(&root), &live_text).unwrap();
         return;
     }
 
-    let path = snapshot_path();
+    let path = snapshot_path(&root);
     let committed = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "could not read {}: {e}\n\nFirst run:\n  OCTRAVPN_OU_UPDATE_SNAPSHOT=1 cargo test --test ou_snapshot",

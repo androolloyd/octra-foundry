@@ -4,8 +4,8 @@
 //! configure the exit, open a session, run the two-tx settle (operator
 //! `settle_claim` + client `settle_confirm`), claim earnings.
 
-use octraforge::{octra_test, ForgeCtx, SubmitError};
 use octra_mock_rpc::PROTOCOL_FEE_BPS;
+use octraforge::{octra_test, ForgeCtx, SubmitError};
 use serde_json::json;
 
 const VALIDATOR: &str = "octV1Address0000000000000000000000000001";
@@ -17,12 +17,7 @@ fn register_one(forge: &mut ForgeCtx) {
     forge.prank(VALIDATOR);
     forge.expect_emit("EndpointRegistered");
     forge
-        .call_register_endpoint_simple(
-            "1.2.3.4:51820",
-            &"de".repeat(32),
-            "eu-west",
-            100,
-        )
+        .call_register_endpoint_simple("1.2.3.4:51820", &"de".repeat(32), "eu-west", 100)
         .expect("register should succeed");
 }
 
@@ -50,7 +45,11 @@ octra_test!(warp_and_age_endpoint, |forge| {
     let active = forge
         .view("list_active_endpoints", vec![json!(0u64), json!(50u64)])
         .unwrap();
-    assert!(active.as_array().unwrap().iter().any(|v| v.as_str() == Some(VALIDATOR)));
+    assert!(active
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v.as_str() == Some(VALIDATOR)));
 });
 
 octra_test!(snapshot_and_revert, |forge| {
@@ -74,12 +73,7 @@ octra_test!(unbonded_address_cannot_register_endpoint, |forge| {
     forge.deploy_octravpn(100, 10);
     forge.prank(VALIDATOR);
     forge.expect_revert("must bond_endpoint first");
-    let r = forge.call_register_endpoint_simple(
-        "1.2.3.4:51820",
-        &"de".repeat(32),
-        "eu-west",
-        100,
-    );
+    let r = forge.call_register_endpoint_simple("1.2.3.4:51820", &"de".repeat(32), "eu-west", 100);
     assert!(r.is_ok(), "got: {r:?}");
 });
 
@@ -121,9 +115,7 @@ octra_test!(full_lifecycle_endpoint_tailnet_session_claim, |forge| {
     // 6. Two-tx settle. Operator claims first; only emits
     //    `SettleClaimed`.
     forge.prank(VALIDATOR);
-    let claimed = forge
-        .call_settle_claim(sid, 2)
-        .expect("settle_claim");
+    let claimed = forge.call_settle_claim(sid, 2).expect("settle_claim");
     assert!(claimed.find_event("SettleClaimed").is_some());
     assert!(
         claimed.find_event("SessionSettled").is_none(),
@@ -134,18 +126,17 @@ octra_test!(full_lifecycle_endpoint_tailnet_session_claim, |forge| {
     //    the settlement. bytes_used=2 → gross=200, fee=1, net=199,
     //    refund=800.
     forge.prank(CLIENT);
-    let settled = forge
-        .call_settle_confirm(sid, 2)
-        .expect("settle_confirm");
+    let settled = forge.call_settle_confirm(sid, 2).expect("settle_confirm");
     assert!(settled.find_event("SettleConfirmed").is_some());
     assert_eq!(settled.event_u64("SessionSettled", "total_paid"), Some(200));
     assert_eq!(settled.event_u64("SessionSettled", "refund"), Some(800));
 
     // 7. Refund returned to tailnet treasury: 2000 - 1000 + 800 = 1800.
-    let tnet = forge
-        .view("get_tailnet", vec![json!(tid)])
-        .unwrap();
-    assert_eq!(tnet.get("treasury").and_then(serde_json::Value::as_u64), Some(1800));
+    let tnet = forge.view("get_tailnet", vec![json!(tid)]).unwrap();
+    assert_eq!(
+        tnet.get("treasury").and_then(serde_json::Value::as_u64),
+        Some(1800)
+    );
 
     // 8. Program treasury collected the 0.5 % protocol fee = 1 OU.
     let pt = forge.view("get_program_treasury", vec![]).unwrap();

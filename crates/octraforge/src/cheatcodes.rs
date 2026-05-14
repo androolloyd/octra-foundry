@@ -10,15 +10,25 @@ pub struct SnapshotId(pub usize);
 /// Pending expectation queued before the next `submit`.
 #[derive(Clone, Debug)]
 pub enum Expectation {
-    Emit { name: String },
+    Emit {
+        name: String,
+    },
     EmitFields {
         name: String,
         fields: Vec<(String, Value)>,
     },
-    Revert { substring: String },
-    RevertExact { expected: String },
-    NoEmit { name: String },
-    Call { method: String },
+    Revert {
+        substring: String,
+    },
+    RevertExact {
+        expected: String,
+    },
+    NoEmit {
+        name: String,
+    },
+    Call {
+        method: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -29,7 +39,9 @@ pub struct SubmitResult {
 
 impl SubmitResult {
     pub fn find_event(&self, name: &str) -> Option<&Value> {
-        self.events.iter().find(|e| e["name"].as_str() == Some(name))
+        self.events
+            .iter()
+            .find(|e| e["name"].as_str() == Some(name))
     }
 
     pub fn find_all_events<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Value> + 'a {

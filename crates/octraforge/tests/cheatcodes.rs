@@ -69,9 +69,7 @@ fn hoax_combines_deal_and_prank() {
 fn make_addr_labels_the_address() {
     let mut ctx = ForgeCtx::new();
     let alice = ctx.make_addr("alice");
-    assert!(ctx
-        .get_label(alice.display())
-        .is_some_and(|l| l == "alice"));
+    assert!(ctx.get_label(alice.display()).is_some_and(|l| l == "alice"));
 }
 
 #[test]
@@ -146,9 +144,7 @@ fn mock_submit_revert_short_circuits() {
 fn mock_view_returns_canned() {
     let mut ctx = ForgeCtx::new();
     ctx.mock_view("get_params", json!({"min_session_deposit": 42u64}));
-    let v = ctx
-        .view("get_params", vec![])
-        .unwrap();
+    let v = ctx.view("get_params", vec![]).unwrap();
     assert_eq(&v["min_session_deposit"].as_u64(), &Some(42));
 }
 
@@ -296,8 +292,8 @@ fn invariant_runner_checks_balance_monotonic() {
     let initial = ctx.balance("octV");
     run_invariant(
         &mut ctx,
-        5,  // 5 runs
-        3,  // 3 steps per run
+        5, // 5 runs
+        3, // 3 steps per run
         |c, _step| {
             // Step: pretend a session opens; just bump the chain epoch.
             c.roll_epoch(1);
