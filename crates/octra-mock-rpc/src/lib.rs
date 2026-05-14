@@ -73,6 +73,38 @@ pub struct ChainState {
     pub join_token_commits: JoinTokenCommits,
     /// Set of token hashes already redeemed. Hex-encoded sha256.
     pub join_token_redeemed: HashSet<String>,
+
+    // ============================================================
+    // v2 (Circle-native) state.
+    //
+    // v2 keeps a parallel set of tables so v1 callers see no changes
+    // and v2 callers see a v2-only world. The two never mix:
+    //   - v1 sessions live in `sessions`, keyed by v1 `session_count`.
+    //   - v2 sessions live in `sessions_v2`, keyed by `session_count_v2`.
+    //
+    // The dispatcher routes by method name (`open_session` vs
+    // `open_session_v2`), so the same RPC endpoint serves both. The
+    // v2 AML schema is `program/main-v2.aml`.
+    // ============================================================
+    /// Authorized proxies per tailnet: tid -> set of proxy addresses.
+    /// Replaces v1's `exits` (which was tracked on `TailnetRow`).
+    pub authorized_proxies_v2: HashMap<u64, HashSet<String>>,
+    /// Per-tailnet "charge internal traffic" toggle. 1 = bill internal
+    /// traffic at settle, 0 = treat internal-class settle as free.
+    /// Default 0 (free) per the v2 AML.
+    pub charge_internal_traffic_v2: HashMap<u64, u8>,
+    /// v2 sessions keyed by their own counter.
+    pub sessions_v2: HashMap<u64, SessionRowV2>,
+    pub session_count_v2: u64,
+    /// HFHE pubkey registration flag for proxies. Mirrors v1
+    /// endpoint registration of an HFHE key, but keyed by proxy
+    /// address rather than operator address.
+    pub proxy_pk_set_v2: HashMap<String, bool>,
+    pub proxy_pk_v2: HashMap<String, String>,
+    pub proxy_zero_ct_v2: HashMap<String, String>,
+    /// Encrypted earnings for v2 proxies. Mock-cleartext as u64,
+    /// same simplification as v1's `earnings`.
+    pub enc_earnings_v2: HashMap<String, u64>,
 }
 
 /// Default operator bond floor mirrored from `program/main.aml`.
@@ -99,6 +131,10 @@ pub struct EndpointRow {
     pub price_per_mb: u64,
     pub registered_at: u64,
     pub reputation: i64,
+    /// Ed25519 pubkey (base64 or hex) the operator uses to sign
+    /// off-chain receipts. Empty if not yet registered. Used by
+    /// `slash_double_sign` to verify equivocation proofs.
+    pub receipt_pubkey: String,
 }
 
 #[derive(Clone)]
@@ -128,6 +164,36 @@ pub struct SessionRow {
     pub operator_claim: Option<(u64, u64)>,
     /// Client's settlement confirmation. `None` until the opener
     /// calls settle_confirm.
+    pub client_confirm: Option<(u64, u64)>,
+}
+
+/// v2 session row. Differs from v1 in three places: `exit` →
+/// `proxy` (semantically the same — the address that settles), plus
+/// new `class` + `price_per_mb` fields stamped at open time. The v2
+/// AML can then compute `total_paid` at settle without consulting
+/// the proxy for a price.
+#[derive(Clone)]
+pub struct SessionRowV2 {
+    pub tailnet_id: u64,
+    /// The Circle's proxy contract address (the v2 settler).
+    pub proxy: String,
+    /// The address that called `open_session_v2`. Only this address
+    /// can later call `settle_confirm_v2`.
+    pub opener: String,
+    pub deposit: u64,
+    pub opened_at: u64,
+    /// 0 = shared exit, 1 = internal subnet. See `program/main-v2.aml`
+    /// `CLASS_SHARED`/`CLASS_INTERNAL`.
+    pub class: u8,
+    /// Tariff stamped at open. Settled `total_paid` is
+    /// `bytes_used * price_per_mb`, subject to the internal-traffic
+    /// override.
+    pub price_per_mb: u64,
+    pub status: u8, // 0 open, 1 settled, 2 refunded
+    /// Proxy's settlement claim: (bytes_used, claimed_at_epoch).
+    pub proxy_claim: Option<(u64, u64)>,
+    /// Client's settlement confirmation. `None` until the opener
+    /// calls `settle_confirm_v2`.
     pub client_confirm: Option<(u64, u64)>,
 }
 
@@ -331,6 +397,7 @@ fn octra_submit(app: &AppState, params: &Value) -> Result<Value, String> {
         "unbond_endpoint" => apply_unbond_endpoint(app, &from)?,
         "finalize_unbond" => apply_finalize_unbond(app, &from)?,
         "gov_slash_operator" => apply_gov_slash_operator(app, tx, &from)?,
+        "slash_double_sign" => apply_slash_double_sign(app, tx, &from)?,
         "register_endpoint" => apply_register_endpoint(app, tx, &from)?,
         "update_endpoint" => apply_update_endpoint(app, tx, &from)?,
         "rotate_keys" => apply_rotate_keys(app, tx, &from)?,
@@ -350,6 +417,18 @@ fn octra_submit(app: &AppState, params: &Value) -> Result<Value, String> {
         "sweep_expired_session" => apply_sweep_expired_session(app, tx, &from)?,
         "claim_earnings" => apply_claim_earnings(app, tx, &from)?,
         "withdraw_program_treasury" => apply_withdraw_treasury(app, tx, &from)?,
+        // ----- v2 (Circle-native) entrypoints -----
+        // See `program/main-v2.aml`. These coexist with v1; the two
+        // session/proxy worlds are wholly independent (different
+        // state tables). Consumers pick which surface to call.
+        "authorize_proxy" => apply_authorize_proxy_v2(app, tx, &from)?,
+        "revoke_proxy" => apply_revoke_proxy_v2(app, tx, &from)?,
+        "set_charge_internal_traffic" => apply_set_charge_internal_traffic_v2(app, tx, &from)?,
+        "open_session_v2" => apply_open_session_v2(app, tx, &from)?,
+        "settle_claim_v2" => apply_settle_claim_v2(app, tx, &from)?,
+        "settle_confirm_v2" => apply_settle_confirm_v2(app, tx, &from)?,
+        "proxy_register_keys" => apply_proxy_register_keys_v2(app, tx, &from)?,
+        "claim_earnings_v2" => apply_claim_earnings_v2(app, tx, &from)?,
         _ => Vec::new(),
     };
 
@@ -435,6 +514,10 @@ fn apply_register_endpoint(app: &AppState, tx: &Value, from: &str) -> Result<Vec
     let initial_zero = p[3].as_str().unwrap_or("").to_string();
     let region = p[4].as_str().unwrap_or("").to_string();
     let price = p[5].as_u64().unwrap_or(0);
+    // Optional 7th param (v1.1+): receipt_pubkey used for off-chain
+    // dual-signed receipt slashing via `slash_double_sign`. Pre-v1.1
+    // callers omit it; we accept either shape and default to empty.
+    let receipt_pk = p.get(6).and_then(|v| v.as_str()).unwrap_or("").to_string();
 
     let mut s = app.state.write();
     coverage::record("register_endpoint", "require[1]"); // not slashed
@@ -475,6 +558,7 @@ fn apply_register_endpoint(app: &AppState, tx: &Value, from: &str) -> Result<Vec
             price_per_mb: price,
             registered_at: epoch,
             reputation: 0,
+            receipt_pubkey: receipt_pk,
         },
     );
     // Initialise encrypted earnings ledger at zero. Mock-cleartext.
@@ -674,6 +758,120 @@ fn apply_gov_slash_operator(app: &AppState, tx: &Value, from: &str) -> Result<Ve
         "burn_amt": burn_amt,
         "bounty_amt": bounty_amt,
         "reason": reason,
+    })])
+}
+
+/// Decode an ed25519 pubkey from base64 (Octra's wire form) or hex
+/// (test-friendly form). Returns None on invalid input.
+/// Decode a 32-byte value from hex (preferred) or base64. Hex is
+/// tried first because 64 hex chars happen to be valid base64 too,
+/// but decode to ~48 bytes and would silently mis-parse.
+fn decode_fixed<const N: usize>(s: &str) -> Option<[u8; N]> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let hex_len = N * 2;
+    let bytes = if s.len() == hex_len {
+        hex::decode(s).ok()?
+    } else {
+        STANDARD.decode(s).ok()?
+    };
+    if bytes.len() != N {
+        return None;
+    }
+    let mut arr = [0u8; N];
+    arr.copy_from_slice(&bytes);
+    Some(arr)
+}
+
+fn decode_ed25519_pubkey(s: &str) -> Option<ed25519_dalek::VerifyingKey> {
+    ed25519_dalek::VerifyingKey::from_bytes(&decode_fixed::<32>(s)?).ok()
+}
+
+fn decode_ed25519_sig(s: &str) -> Option<ed25519_dalek::Signature> {
+    Some(ed25519_dalek::Signature::from_bytes(&decode_fixed::<64>(
+        s,
+    )?))
+}
+
+/// Off-chain receipt equivocation slash. Mirrors v1.1 AML
+/// `slash_double_sign(operator_addr, session_id, payload_a, sig_a,
+/// payload_b, sig_b)`. Verifies both sigs under the operator's
+/// stored `receipt_pubkey`; any two distinct signed payloads are
+/// slashable evidence.
+fn apply_slash_double_sign(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
+    let p = tx
+        .get("params")
+        .and_then(|x| x.as_array())
+        .ok_or("params")?;
+    let operator = p[0].as_str().unwrap_or("").to_string();
+    let _session_id = p.get(1).and_then(Value::as_u64).unwrap_or(0);
+    let payload_a = p.get(2).and_then(Value::as_str).unwrap_or("");
+    let sig_a = p.get(3).and_then(Value::as_str).unwrap_or("");
+    let payload_b = p.get(4).and_then(Value::as_str).unwrap_or("");
+    let sig_b = p.get(5).and_then(Value::as_str).unwrap_or("");
+
+    coverage::record("slash_double_sign", "require[1]"); // not slashed
+    coverage::record("slash_double_sign", "require[2]"); // distinct payloads
+    coverage::record("slash_double_sign", "require[3]"); // receipt pubkey present
+    coverage::record("slash_double_sign", "require[4]"); // sig_a verifies
+    coverage::record("slash_double_sign", "require[5]"); // sig_b verifies
+
+    if payload_a == payload_b {
+        return Err("payloads identical".into());
+    }
+    let mut s = app.state.write();
+    if s.endpoint_slashed.contains(&operator) {
+        return Err("already slashed".into());
+    }
+    let receipt_pk_str = s
+        .endpoints
+        .get(&operator)
+        .map(|e| e.receipt_pubkey.clone())
+        .unwrap_or_default();
+    if receipt_pk_str.is_empty() {
+        return Err("operator has no receipt pubkey".into());
+    }
+    let pk = decode_ed25519_pubkey(&receipt_pk_str).ok_or("operator receipt_pubkey malformed")?;
+    let sa = decode_ed25519_sig(sig_a).ok_or("sig_a malformed")?;
+    let sb = decode_ed25519_sig(sig_b).ok_or("sig_b malformed")?;
+    if pk.verify_strict(payload_a.as_bytes(), &sa).is_err() {
+        return Err("sig_a invalid".into());
+    }
+    if pk.verify_strict(payload_b.as_bytes(), &sb).is_err() {
+        return Err("sig_b invalid".into());
+    }
+
+    let live = s.endpoint_stake.get(&operator).copied().unwrap_or(0);
+    let unb = s
+        .endpoint_unbonding
+        .get(&operator)
+        .map_or(0, |(amt, _)| *amt);
+    let total = live.checked_add(unb).ok_or("stake overflow")?;
+    if total == 0 {
+        return Err("no stake to slash".into());
+    }
+    let burn_amt = total.checked_mul(SLASH_BURN_BPS).ok_or("overflow burn")? / 10_000;
+    let bounty_amt = total - burn_amt;
+
+    s.endpoint_stake.insert(operator.clone(), 0);
+    s.endpoint_unbonding.remove(&operator);
+    s.endpoint_slashed.insert(operator.clone());
+    if let Some(ep) = s.endpoints.get_mut(&operator) {
+        ep.active = false;
+    }
+    s.program_treasury = s
+        .program_treasury
+        .checked_add(burn_amt)
+        .ok_or("overflow treasury")?;
+    if bounty_amt > 0 {
+        *s.balances.entry(from.to_string()).or_insert(0) += bounty_amt;
+    }
+    Ok(vec![json!({
+        "name": "OperatorSlashed",
+        "addr": operator,
+        "stake": total,
+        "burn_amt": burn_amt,
+        "bounty_amt": bounty_amt,
+        "reason": "double-sign",
     })])
 }
 
@@ -1334,6 +1532,449 @@ fn apply_withdraw_treasury(app: &AppState, tx: &Value, from: &str) -> Result<Vec
     })])
 }
 
+// ===============================================================
+// v2 (Circle-native) handlers.
+//
+// Live alongside the v1 handlers above. The two worlds share
+// `tailnets`, `members`, balances, epoch — but use disjoint session
+// + earnings tables (`sessions_v2`, `enc_earnings_v2`, etc.) so a
+// v2 settle never touches v1 state and vice versa.
+// ===============================================================
+
+/// Owner authorizes a Circle's proxy contract to settle sessions for
+/// `tailnet_id`. v2 replacement for v1's `configure_tailnet_exit`
+/// (which gated on protocol-level operator registration). v2 does
+/// NOT inspect the proxy — operators are Circles and main-net sees
+/// only their proxy address.
+fn apply_authorize_proxy_v2(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
+    let p = tx
+        .get("params")
+        .and_then(|x| x.as_array())
+        .ok_or("params")?;
+    let tid = p[0].as_u64().ok_or("tailnet_id u64")?;
+    let proxy = p
+        .get(1)
+        .and_then(|x| x.as_str())
+        .ok_or("proxy addr missing")?
+        .to_string();
+    if proxy.is_empty() {
+        return Err("invalid proxy".into());
+    }
+    let mut s = app.state.write();
+    let t = s.tailnets.get(&tid).ok_or("tailnet not found")?;
+    if t.owner != from {
+        return Err("not tailnet owner".into());
+    }
+    s.authorized_proxies_v2
+        .entry(tid)
+        .or_default()
+        .insert(proxy.clone());
+    Ok(vec![json!({
+        "name": "ProxyAuthorized",
+        "tailnet_id": tid,
+        "proxy": proxy,
+    })])
+}
+
+fn apply_revoke_proxy_v2(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
+    let p = tx
+        .get("params")
+        .and_then(|x| x.as_array())
+        .ok_or("params")?;
+    let tid = p[0].as_u64().ok_or("tailnet_id u64")?;
+    let proxy = p
+        .get(1)
+        .and_then(|x| x.as_str())
+        .ok_or("proxy addr missing")?
+        .to_string();
+    let mut s = app.state.write();
+    let t = s.tailnets.get(&tid).ok_or("tailnet not found")?;
+    if t.owner != from {
+        return Err("not tailnet owner".into());
+    }
+    if let Some(set) = s.authorized_proxies_v2.get_mut(&tid) {
+        set.remove(&proxy);
+    }
+    Ok(vec![json!({
+        "name": "ProxyRevoked",
+        "tailnet_id": tid,
+        "proxy": proxy,
+    })])
+}
+
+fn apply_set_charge_internal_traffic_v2(
+    app: &AppState,
+    tx: &Value,
+    from: &str,
+) -> Result<Vec<Value>, String> {
+    let p = tx
+        .get("params")
+        .and_then(|x| x.as_array())
+        .ok_or("params")?;
+    let tid = p[0].as_u64().ok_or("tailnet_id u64")?;
+    let charge = p
+        .get(1)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("charge missing")?;
+    if charge != 0 && charge != 1 {
+        return Err("charge must be 0 or 1".into());
+    }
+    let mut s = app.state.write();
+    let t = s.tailnets.get(&tid).ok_or("tailnet not found")?;
+    if t.owner != from {
+        return Err("not tailnet owner".into());
+    }
+    s.charge_internal_traffic_v2.insert(tid, charge as u8);
+    Ok(vec![json!({
+        "name": "TailnetChargeInternalSet",
+        "tailnet_id": tid,
+        "charge": charge,
+    })])
+}
+
+const V2_CLASS_SHARED: u8 = 0;
+const V2_CLASS_INTERNAL: u8 = 1;
+/// Mirror of the v2 AML's `min_session_deposit`. Kept in sync with
+/// the existing `get_params` default of `10` so consumers can use
+/// the same constant for both surfaces.
+const V2_MIN_SESSION_DEPOSIT: u64 = 10;
+
+fn apply_open_session_v2(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
+    let p = tx
+        .get("params")
+        .and_then(|x| x.as_array())
+        .ok_or("params")?;
+    let tid = p[0].as_u64().ok_or("tailnet_id u64")?;
+    let proxy = p
+        .get(1)
+        .and_then(|x| x.as_str())
+        .ok_or("proxy addr missing")?
+        .to_string();
+    let class = p
+        .get(2)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("class missing")? as u8;
+    let price_per_mb = p
+        .get(3)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("price missing")?;
+    let max_pay = p
+        .get(4)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("max_pay missing")?;
+
+    if class != V2_CLASS_SHARED && class != V2_CLASS_INTERNAL {
+        return Err("invalid class".into());
+    }
+    if max_pay < V2_MIN_SESSION_DEPOSIT {
+        return Err("deposit below minimum".into());
+    }
+
+    let mut s = app.state.write();
+    let opened_at = s.epoch;
+    // Device-multi-addr resolution mirrors v1's `open_session`.
+    let device_owner = s.device_owner.get(from).cloned();
+    let authorized = s
+        .authorized_proxies_v2
+        .get(&tid)
+        .is_some_and(|set| set.contains(&proxy));
+    if !authorized {
+        return Err("proxy not authorized".into());
+    }
+    let t = s.tailnets.get_mut(&tid).ok_or("tailnet not found")?;
+    let direct = t.members.contains(from);
+    let via_device = device_owner
+        .as_deref()
+        .is_some_and(|w| t.members.contains(w));
+    if !direct && !via_device {
+        return Err("not a tailnet member".into());
+    }
+    if t.treasury < max_pay {
+        return Err("tailnet treasury insufficient".into());
+    }
+    t.treasury -= max_pay;
+
+    let sid = s.session_count_v2 + 1;
+    s.session_count_v2 = sid;
+    s.sessions_v2.insert(
+        sid,
+        SessionRowV2 {
+            tailnet_id: tid,
+            proxy: proxy.clone(),
+            opener: from.to_string(),
+            deposit: max_pay,
+            opened_at,
+            class,
+            price_per_mb,
+            status: 0,
+            proxy_claim: None,
+            client_confirm: None,
+        },
+    );
+
+    Ok(vec![json!({
+        "name": "SessionOpened",
+        "session_id": sid,
+        "tailnet_id": tid,
+        "proxy": proxy,
+        "class": class,
+        "price_per_mb": price_per_mb,
+        "deposit": max_pay,
+        "opened_at": opened_at,
+    })])
+}
+
+/// Proxy submits its claim. Equivocation refunds the deposit and
+/// emits `ProxyBondSlashed` — the mock has no real bond to slash
+/// (the bond lives in the proxy contract per litepaper §4.4.2),
+/// so the event uses `amount: 0` and we just refund + mark
+/// `status = 2` (refunded).
+fn apply_settle_claim_v2(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
+    let p = tx
+        .get("params")
+        .and_then(|x| x.as_array())
+        .ok_or("params")?;
+    let sid = p[0].as_u64().ok_or("session_id u64")?;
+    let bytes_used = p
+        .get(1)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("bytes_used u64")?;
+
+    let mut s = app.state.write();
+    let (tid, deposit, prev_claim, proxy) = {
+        let sess = s.sessions_v2.get(&sid).ok_or("session not found")?;
+        if sess.status != 0 {
+            return Err("session not open".into());
+        }
+        if sess.proxy != from {
+            return Err("caller is not the session proxy".into());
+        }
+        (
+            sess.tailnet_id,
+            sess.deposit,
+            sess.proxy_claim,
+            sess.proxy.clone(),
+        )
+    };
+    // Authorization is checked again at claim time: if the proxy was
+    // revoked between open and claim, the claim fails.
+    let still_authorized = s
+        .authorized_proxies_v2
+        .get(&tid)
+        .is_some_and(|set| set.contains(&proxy));
+    if !still_authorized {
+        return Err("proxy not authorized".into());
+    }
+
+    if let Some((prev_bytes, _)) = prev_claim {
+        if prev_bytes == bytes_used {
+            // Idempotent retry.
+            return Ok(vec![]);
+        }
+        // Equivocation: refund + slash event.
+        if let Some(sess) = s.sessions_v2.get_mut(&sid) {
+            sess.status = 2;
+        }
+        if let Some(t) = s.tailnets.get_mut(&tid) {
+            t.treasury += deposit;
+        }
+        return Ok(vec![
+            json!({
+                "name": "ProxyBondSlashed",
+                "proxy": from,
+                // Mock has no proxy-side bond resource; the real
+                // chain would `proxy.slash_bond(deposit, ...)`.
+                "amount": 0,
+                "reason": "equivocation",
+            }),
+            json!({
+                "name": "SessionRefunded",
+                "session_id": sid,
+                "reason": "operator-equivocation",
+            }),
+        ]);
+    }
+
+    let claimed_at = s.epoch;
+    if let Some(sess) = s.sessions_v2.get_mut(&sid) {
+        sess.proxy_claim = Some((bytes_used, claimed_at));
+    }
+    Ok(vec![json!({
+        "name": "SettleClaimed",
+        "session_id": sid,
+        "proxy": from,
+        "bytes_used": bytes_used,
+    })])
+}
+
+fn apply_settle_confirm_v2(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
+    let p = tx
+        .get("params")
+        .and_then(|x| x.as_array())
+        .ok_or("params")?;
+    let sid = p[0].as_u64().ok_or("session_id u64")?;
+    let bytes_used = p
+        .get(1)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("bytes_used u64")?;
+
+    let mut s = app.state.write();
+    let (tid, deposit, proxy, class, price, op_bytes) = {
+        let sess = s.sessions_v2.get(&sid).ok_or("session not found")?;
+        if sess.status != 0 {
+            return Err("session not open".into());
+        }
+        if sess.opener != from {
+            return Err("not session opener".into());
+        }
+        let (ob, _) = sess.proxy_claim.ok_or("proxy has not claimed yet")?;
+        (
+            sess.tailnet_id,
+            sess.deposit,
+            sess.proxy.clone(),
+            sess.class,
+            sess.price_per_mb,
+            ob,
+        )
+    };
+
+    let confirmed_at = s.epoch;
+    if op_bytes != bytes_used {
+        if let Some(sess) = s.sessions_v2.get_mut(&sid) {
+            sess.client_confirm = Some((bytes_used, confirmed_at));
+        }
+        return Ok(vec![json!({
+            "name": "SettleDispute",
+            "session_id": sid,
+            "operator_bytes": op_bytes,
+            "client_bytes": bytes_used,
+        })]);
+    }
+
+    // Internal-class + tailnet says don't charge → enforce free.
+    let charge = s.charge_internal_traffic_v2.get(&tid).copied().unwrap_or(0);
+    let total_paid = if class == V2_CLASS_INTERNAL && charge == 0 {
+        0u64
+    } else {
+        bytes_used.checked_mul(price).ok_or("overflow pay")?
+    };
+    if total_paid > deposit {
+        return Err("claim exceeds escrow".into());
+    }
+    let protocol_fee = total_paid
+        .checked_mul(PROTOCOL_FEE_BPS)
+        .ok_or("overflow fee")?
+        / 10_000;
+    let net_pay = total_paid - protocol_fee;
+    let refund = deposit - total_paid;
+
+    if let Some(sess) = s.sessions_v2.get_mut(&sid) {
+        sess.status = 1;
+        sess.client_confirm = Some((bytes_used, confirmed_at));
+    }
+    if net_pay > 0 && s.proxy_pk_set_v2.get(&proxy).copied().unwrap_or(false) {
+        // Mirrors v1's `enc_earnings += net_pay`. Mock-cleartext.
+        *s.enc_earnings_v2.entry(proxy.clone()).or_insert(0) += net_pay;
+    }
+    if protocol_fee > 0 {
+        s.program_treasury = s
+            .program_treasury
+            .checked_add(protocol_fee)
+            .ok_or("overflow treasury")?;
+    }
+    if refund > 0 {
+        if let Some(t) = s.tailnets.get_mut(&tid) {
+            t.treasury += refund;
+        }
+    }
+    Ok(vec![
+        json!({
+            "name": "SettleConfirmed",
+            "session_id": sid,
+            "opener": from,
+            "bytes_used": bytes_used,
+        }),
+        json!({
+            "name": "SessionSettled",
+            "session_id": sid,
+            "proxy": proxy,
+            "class": class,
+            "bytes_used": bytes_used,
+            "total_paid": total_paid,
+            "refund": refund,
+        }),
+    ])
+}
+
+fn apply_proxy_register_keys_v2(
+    app: &AppState,
+    tx: &Value,
+    from: &str,
+) -> Result<Vec<Value>, String> {
+    let p = tx
+        .get("params")
+        .and_then(|x| x.as_array())
+        .ok_or("params")?;
+    let hfhe = p
+        .first()
+        .and_then(|x| x.as_str())
+        .ok_or("hfhe_pubkey missing")?
+        .to_string();
+    let initial_zero = p
+        .get(1)
+        .and_then(|x| x.as_str())
+        .ok_or("initial_enc_zero missing")?
+        .to_string();
+    if hfhe.is_empty() || initial_zero.is_empty() {
+        return Err("hfhe pubkey + initial enc(0) required".into());
+    }
+    let mut s = app.state.write();
+    if s.proxy_pk_set_v2.get(from).copied().unwrap_or(false) {
+        return Err("already registered".into());
+    }
+    s.proxy_pk_v2.insert(from.to_string(), hfhe);
+    s.proxy_zero_ct_v2.insert(from.to_string(), initial_zero);
+    s.enc_earnings_v2.insert(from.to_string(), 0);
+    s.proxy_pk_set_v2.insert(from.to_string(), true);
+    // v2 AML emits nothing here; matching that behavior.
+    Ok(Vec::new())
+}
+
+/// v2 earnings claim, keyed by proxy address. Same mock-FHE
+/// simplification as v1: `proof_ct` must exactly equal the
+/// outstanding cleartext balance.
+fn apply_claim_earnings_v2(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Value>, String> {
+    let p = tx
+        .get("params")
+        .and_then(|x| x.as_array())
+        .ok_or("params")?;
+    let claimed = p[0].as_u64().unwrap_or(0);
+    let proof = p.get(1).and_then(|x| x.as_str()).unwrap_or("").to_string();
+
+    if claimed == 0 {
+        return Err("amount>0".into());
+    }
+    if proof.is_empty() {
+        return Err("proof required".into());
+    }
+
+    let mut s = app.state.write();
+    if !s.proxy_pk_set_v2.get(from).copied().unwrap_or(false) {
+        return Err("no keys registered".into());
+    }
+    let balance = s.enc_earnings_v2.get(from).copied().unwrap_or(0);
+    if balance != claimed {
+        return Err("bad opening".into());
+    }
+    s.enc_earnings_v2.insert(from.to_string(), 0);
+    *s.balances.entry(from.to_string()).or_insert(0) += claimed;
+    Ok(vec![json!({
+        "name": "EarningsClaimed",
+        "proxy": from,
+        "amount": claimed,
+    })])
+}
+
 fn octra_transaction(app: &AppState, params: &Value) -> Result<Value, String> {
     let arr = params.as_array().ok_or("params not array")?;
     let hash = arr.first().and_then(|x| x.as_str()).ok_or("hash missing")?;
@@ -1435,6 +2076,11 @@ fn contract_call(app: &AppState, params: &Value) -> Result<Value, String> {
                     "acl_policy": t.acl_policy,
                     "created_at": t.created_at,
                     "exit_count": t.exits.len(),
+                    "charge_internal_traffic": s
+                        .charge_internal_traffic_v2
+                        .get(&tid)
+                        .copied()
+                        .unwrap_or(0),
                 })),
                 None => Ok(json!(null)),
             }
@@ -1511,6 +2157,74 @@ fn contract_call(app: &AppState, params: &Value) -> Result<Value, String> {
         "get_program_treasury" => {
             let s = app.state.read();
             Ok(json!(s.program_treasury))
+        }
+        // ----- v2 views -----
+        "get_session_v2" => {
+            let sid = pp
+                .first()
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("sid u64")?;
+            let s = app.state.read();
+            match s.sessions_v2.get(&sid) {
+                Some(sess) => Ok(json!({
+                    "tailnet_id": sess.tailnet_id,
+                    "proxy": sess.proxy,
+                    "opener": sess.opener,
+                    "deposit": sess.deposit,
+                    "opened_at": sess.opened_at,
+                    "class": sess.class,
+                    "price_per_mb": sess.price_per_mb,
+                    "status": sess.status,
+                    "proxy_claim": sess.proxy_claim.map(|(b, t)| json!({"bytes_used": b, "claimed_at": t})),
+                    "client_confirm": sess.client_confirm.map(|(b, t)| json!({"bytes_used": b, "confirmed_at": t})),
+                })),
+                None => Ok(json!(null)),
+            }
+        }
+        "is_proxy_authorized" => {
+            let tid = pp
+                .first()
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("tailnet_id u64")?;
+            let proxy = pp.get(1).and_then(|x| x.as_str()).ok_or("proxy")?;
+            let s = app.state.read();
+            let authorized = s
+                .authorized_proxies_v2
+                .get(&tid)
+                .is_some_and(|set| set.contains(proxy));
+            Ok(json!(i32::from(authorized)))
+        }
+        "get_authorized_proxies" => {
+            let tid = pp
+                .first()
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("tailnet_id u64")?;
+            let s = app.state.read();
+            let mut list: Vec<String> = s
+                .authorized_proxies_v2
+                .get(&tid)
+                .map(|set| set.iter().cloned().collect())
+                .unwrap_or_default();
+            list.sort();
+            Ok(json!(list))
+        }
+        "get_charge_internal_traffic" => {
+            let tid = pp
+                .first()
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("tailnet_id u64")?;
+            let s = app.state.read();
+            Ok(json!(s
+                .charge_internal_traffic_v2
+                .get(&tid)
+                .copied()
+                .unwrap_or(0)))
+        }
+        "get_encrypted_earnings_v2" => {
+            let addr = pp.first().and_then(|x| x.as_str()).ok_or("addr")?;
+            let s = app.state.read();
+            let amount = s.enc_earnings_v2.get(addr).copied().unwrap_or(0);
+            Ok(json!(format!("hfhe_v2|mock|{amount:016x}")))
         }
         "get_params" => Ok(json!({
             "min_session_deposit": 10,

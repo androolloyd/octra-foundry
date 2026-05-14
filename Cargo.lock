@@ -899,8 +899,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "clap",
  "curve25519-dalek",
+ "ed25519-dalek",
  "hex",
  "octra-core",
  "parking_lot",
@@ -918,6 +920,7 @@ name = "octraforge"
 version = "0.1.0"
 dependencies = [
  "curve25519-dalek",
+ "ed25519-dalek",
  "hex",
  "octra-core",
  "octra-mock-rpc",

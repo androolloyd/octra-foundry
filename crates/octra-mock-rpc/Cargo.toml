@@ -20,8 +20,10 @@ octra-core = { workspace = true }
 
 anyhow = { workspace = true }
 axum = { workspace = true }
+base64 = { workspace = true }
 clap = { workspace = true }
 curve25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

@@ -233,6 +233,7 @@ mod tests {
                 price_per_mb: 1,
                 registered_at: 1,
                 reputation: 0,
+                receipt_pubkey: String::new(),
             },
         );
         let r = active_endpoints_have_stake(&ctx);

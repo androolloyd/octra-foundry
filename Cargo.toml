@@ -58,6 +58,7 @@ rust-version = "1.75"
 [workspace.dependencies]
 anyhow      = "1"
 axum        = "0.7"
+base64      = "0.22"
 bs58        = "0.5"
 clap        = { version = "4", features = ["derive", "env"] }
 curve25519-dalek = { version = "4", features = ["serde", "digest", "rand_core"] }

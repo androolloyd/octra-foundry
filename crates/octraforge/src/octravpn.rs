@@ -113,9 +113,13 @@ impl ForgeCtx {
         }))
     }
 
-    /// `register_endpoint(endpoint, wg_pubkey, hfhe_pubkey, initial_enc_zero, region, price_per_mb)`.
+    /// `register_endpoint(endpoint, wg_pubkey, hfhe_pubkey, initial_enc_zero, region, price_per_mb, receipt_pubkey)`.
     ///
     /// Caller must have at least `MIN_ENDPOINT_STAKE` bonded.
+    /// `receipt_pubkey` is the ed25519 pubkey the operator uses to
+    /// sign off-chain receipts; needed for `slash_double_sign` to be
+    /// useful. Pass an empty string if you only want the bond/register
+    /// path tested.
     #[allow(clippy::too_many_arguments)]
     pub fn call_register_endpoint(
         &mut self,
@@ -125,6 +129,7 @@ impl ForgeCtx {
         initial_enc_zero_hex: &str,
         region: &str,
         price_per_mb: u64,
+        receipt_pubkey: &str,
     ) -> Result<SubmitResult, SubmitError> {
         self.submit(json!({
             "kind": "contract_call",
@@ -138,6 +143,7 @@ impl ForgeCtx {
                 initial_enc_zero_hex,
                 region,
                 price_per_mb,
+                receipt_pubkey,
             ],
             "value": 0u64,
             "fee": 10u64,
@@ -145,7 +151,9 @@ impl ForgeCtx {
         }))
     }
 
-    /// Convenience over `call_register_endpoint` using mock HFHE values.
+    /// Convenience over `call_register_endpoint` using mock HFHE values
+    /// and an empty `receipt_pubkey` (the off-chain dual-sig slash path
+    /// is disabled — use `call_register_endpoint` directly to enable).
     pub fn call_register_endpoint_simple(
         &mut self,
         endpoint: &str,
@@ -160,7 +168,45 @@ impl ForgeCtx {
             MOCK_INITIAL_ENC_ZERO,
             region,
             price_per_mb,
+            "",
         )
+    }
+
+    /// `slash_double_sign(operator, session_id, payload_a, sig_a, payload_b, sig_b)`.
+    ///
+    /// The slasher (= caller) collects two ed25519-signed receipt
+    /// payloads from `operator`'s off-chain signing key with the same
+    /// `session_id` but different `bytes_used` / `blind`. Verifying
+    /// both sigs under the registered `receipt_pubkey` is sufficient
+    /// evidence; the AML slashes 90% to treasury / 10% bounty to
+    /// caller.
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_slash_double_sign(
+        &mut self,
+        operator: &str,
+        session_id: u64,
+        payload_a_hex: &str,
+        sig_a_hex: &str,
+        payload_b_hex: &str,
+        sig_b_hex: &str,
+    ) -> Result<SubmitResult, SubmitError> {
+        self.submit(json!({
+            "kind": "contract_call",
+            "from": DEFAULT_CALLER,
+            "to": self.program_addr,
+            "method": "slash_double_sign",
+            "params": [
+                operator,
+                session_id,
+                payload_a_hex,
+                sig_a_hex,
+                payload_b_hex,
+                sig_b_hex,
+            ],
+            "value": 0u64,
+            "fee": 10u64,
+            "nonce": 0u64,
+        }))
     }
 
     /// `update_endpoint(endpoint, region, price_per_mb)`.
@@ -519,6 +565,168 @@ impl ForgeCtx {
             "to": self.program_addr,
             "method": "revoke_device",
             "params": [device],
+            "value": 0u64,
+            "fee": 10u64,
+            "nonce": 0u64,
+        }))
+    }
+
+    // ============== v2 helpers ====================================
+    //
+    // The v2 OctraVPN program splits operator/proxy roles, supports
+    // multi-class billing (shared vs internal traffic), and lets the
+    // tailnet owner authorize specific proxy addresses. The mock-rpc
+    // dispatches v2 methods by exact name (`_v2` suffix where needed).
+
+    /// "Deploy" `OctraVPN` v2. Like the v1 deploy this is a no-op that
+    /// returns the program address; the mock distinguishes v1 from v2
+    /// by the method suffix on incoming calls, not by deploy site.
+    pub fn deploy_octravpn_v2(
+        &mut self,
+        _min_session_deposit: u64,
+        _min_tailnet_deposit: u64,
+    ) -> String {
+        self.program_addr.clone()
+    }
+
+    /// `authorize_proxy(tailnet_id, proxy_addr)` — tailnet-owner only.
+    /// Grants `proxy_addr` permission to serve sessions on the named
+    /// tailnet.
+    pub fn call_authorize_proxy(
+        &mut self,
+        tailnet_id: u64,
+        proxy_addr: &str,
+    ) -> Result<SubmitResult, SubmitError> {
+        self.submit(json!({
+            "kind": "contract_call",
+            "from": DEFAULT_CALLER,
+            "to": self.program_addr,
+            "method": "authorize_proxy",
+            "params": [tailnet_id, proxy_addr],
+            "value": 0u64,
+            "fee": 10u64,
+            "nonce": 0u64,
+        }))
+    }
+
+    /// `revoke_proxy(tailnet_id, proxy_addr)` — tailnet-owner only.
+    pub fn call_revoke_proxy(
+        &mut self,
+        tailnet_id: u64,
+        proxy_addr: &str,
+    ) -> Result<SubmitResult, SubmitError> {
+        self.submit(json!({
+            "kind": "contract_call",
+            "from": DEFAULT_CALLER,
+            "to": self.program_addr,
+            "method": "revoke_proxy",
+            "params": [tailnet_id, proxy_addr],
+            "value": 0u64,
+            "fee": 10u64,
+            "nonce": 0u64,
+        }))
+    }
+
+    /// `set_charge_internal_traffic(tailnet_id, charge)` — toggle billing
+    /// for class=internal sessions on this tailnet. `charge = 0` means
+    /// internal traffic is free; `charge = 1` means bill at the same
+    /// per-MB rate as shared traffic.
+    pub fn call_set_charge_internal_traffic(
+        &mut self,
+        tailnet_id: u64,
+        charge: u64,
+    ) -> Result<SubmitResult, SubmitError> {
+        self.submit(json!({
+            "kind": "contract_call",
+            "from": DEFAULT_CALLER,
+            "to": self.program_addr,
+            "method": "set_charge_internal_traffic",
+            "params": [tailnet_id, charge],
+            "value": 0u64,
+            "fee": 10u64,
+            "nonce": 0u64,
+        }))
+    }
+
+    /// `open_session_v2(tailnet_id, proxy_addr, class, price_per_mb, max_pay)`.
+    ///
+    /// `class` is `0` for shared traffic (billed) and `1` for internal
+    /// traffic (subject to the per-tailnet toggle).
+    pub fn call_open_session_v2(
+        &mut self,
+        tailnet_id: u64,
+        proxy_addr: &str,
+        class: u64,
+        price_per_mb: u64,
+        max_pay: u64,
+    ) -> Result<SubmitResult, SubmitError> {
+        self.submit(json!({
+            "kind": "contract_call",
+            "from": DEFAULT_CALLER,
+            "to": self.program_addr,
+            "method": "open_session_v2",
+            "params": [tailnet_id, proxy_addr, class, price_per_mb, max_pay],
+            "value": 0u64,
+            "fee": 10u64,
+            "nonce": 0u64,
+        }))
+    }
+
+    /// `settle_claim_v2(session_id, bytes_used)` — proxy-side claim
+    /// for a v2 session.
+    pub fn call_settle_claim_v2(
+        &mut self,
+        session_id: u64,
+        bytes_used: u64,
+    ) -> Result<SubmitResult, SubmitError> {
+        self.submit(json!({
+            "kind": "contract_call",
+            "from": DEFAULT_CALLER,
+            "to": self.program_addr,
+            "method": "settle_claim_v2",
+            "params": [session_id, bytes_used],
+            "value": 0u64,
+            "fee": 10u64,
+            "nonce": 0u64,
+        }))
+    }
+
+    /// `settle_confirm_v2(session_id, bytes_used)` — client-side
+    /// confirmation for a v2 session. Matching bytes apply settlement
+    /// (`SessionSettled`); mismatched bytes record a dispute and leave
+    /// the session open.
+    pub fn call_settle_confirm_v2(
+        &mut self,
+        session_id: u64,
+        bytes_used: u64,
+    ) -> Result<SubmitResult, SubmitError> {
+        self.submit(json!({
+            "kind": "contract_call",
+            "from": DEFAULT_CALLER,
+            "to": self.program_addr,
+            "method": "settle_confirm_v2",
+            "params": [session_id, bytes_used],
+            "value": 0u64,
+            "fee": 10u64,
+            "nonce": 0u64,
+        }))
+    }
+
+    /// `proxy_register_keys(hfhe_pubkey, initial_enc_zero)` — proxies
+    /// publish their HFHE encryption material so the program can route
+    /// encrypted earnings to them. Mirrors the operator-side key
+    /// portion of v1's `register_endpoint`.
+    pub fn call_proxy_register_keys(
+        &mut self,
+        hfhe_pubkey: &str,
+        initial_enc_zero: &str,
+    ) -> Result<SubmitResult, SubmitError> {
+        self.submit(json!({
+            "kind": "contract_call",
+            "from": DEFAULT_CALLER,
+            "to": self.program_addr,
+            "method": "proxy_register_keys",
+            "params": [hfhe_pubkey, initial_enc_zero],
             "value": 0u64,
             "fee": 10u64,
             "nonce": 0u64,
