@@ -37,13 +37,22 @@ pub enum WalletCmd {
         #[arg(long, env = "OCTRA_KEY_FILE")]
         key: PathBuf,
     },
-    /// Print the raw 32-byte ed25519 verifying-key hex derived from a
-    /// key file. This is the form `register_endpoint` expects in the
-    /// `receipt_pubkey` slot — NOT the seed/secret bytes.
+    /// Print the raw 32-byte ed25519 verifying-key derived from a key
+    /// file. Use `--format base64` (default) when feeding the result
+    /// into `register_endpoint.receipt_pubkey` or `ed25519_ok` — AML
+    /// expects base64. Use `--format hex` for tooling interop.
     Pubkey {
         #[arg(long, env = "OCTRA_KEY_FILE")]
         key: PathBuf,
+        #[arg(long, value_enum, default_value_t = PubkeyFormat::Base64)]
+        format: PubkeyFormat,
     },
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+pub enum PubkeyFormat {
+    Hex,
+    Base64,
 }
 
 pub fn dispatch(cmd: WalletCmd) -> Result<()> {
@@ -51,14 +60,18 @@ pub fn dispatch(cmd: WalletCmd) -> Result<()> {
         WalletCmd::New { out } => new_wallet(out.as_deref()),
         WalletCmd::Sign { key, message } => sign_message(&key, &message),
         WalletCmd::Addr { key } => print_address(&key),
-        WalletCmd::Pubkey { key } => print_pubkey_hex(&key),
+        WalletCmd::Pubkey { key, format } => print_pubkey(&key, format),
     }
 }
 
-fn print_pubkey_hex(p: &Path) -> Result<()> {
+fn print_pubkey(p: &Path, format: PubkeyFormat) -> Result<()> {
     let bytes = read_secret_hex(p)?;
     let kp = KeyPair::from_secret_bytes(&bytes);
-    println!("{}", hex::encode(kp.public.0));
+    let out = match format {
+        PubkeyFormat::Hex => hex::encode(kp.public.0),
+        PubkeyFormat::Base64 => STANDARD.encode(kp.public.0),
+    };
+    println!("{out}");
     Ok(())
 }
 
