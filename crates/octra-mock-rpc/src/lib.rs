@@ -373,14 +373,121 @@ fn octra_balance(app: &AppState, params: &Value) -> Result<Value, String> {
     }))
 }
 
+/// Normalize a submitted transaction to a working `Value` that the
+/// per-method `apply_*` handlers can read. Accepts two shapes:
+///
+///   1. **Legacy in-workspace shape** — `{"kind":"contract_call",
+///      "method":..., "params":..., "value":..., "fee":..., "from":...}`.
+///      Used unchanged.
+///   2. **Octra wire envelope** — `{"from","to_","amount","ou","nonce",
+///      "timestamp","op_type","encrypted_data",...}` (signed or not).
+///      For `op_type == "call"` we parse `encrypted_data` as
+///      `{"method","params"}` and inject those at the top level so the
+///      existing handlers find them. `amount` (string) is mapped to
+///      `value` (u64) for handlers that read `value` for in-flow funds
+///      (`bond_endpoint`, `create_tailnet`, `deposit_to_tailnet`).
+///
+/// Returns `(working_tx, method, op_type)`. For `op_type == "deploy"`
+/// the method is the special token `"__deploy__"` and the working tx
+/// is the unmodified envelope (no apply_* dispatch will fire).
+fn normalize_submission(tx: &Value) -> Result<(Value, String, String), String> {
+    let obj = tx.as_object().ok_or("tx must be a JSON object")?;
+    // (1) Legacy in-workspace shape: top-level `method`. Just use it.
+    if let Some(m) = obj.get("method").and_then(|x| x.as_str()) {
+        let op = obj
+            .get("op_type")
+            .and_then(|x| x.as_str())
+            .unwrap_or("call")
+            .to_string();
+        return Ok((tx.clone(), m.to_string(), op));
+    }
+    // (2) Real Octra wire envelope: dispatch by `op_type` + decoded
+    //     `encrypted_data`.
+    let op = obj
+        .get("op_type")
+        .and_then(|x| x.as_str())
+        .ok_or("missing method or op_type")?
+        .to_string();
+
+    // Build a working tx for the handlers. Start from the envelope and
+    // splice in legacy-style fields the handlers expect.
+    let mut working = serde_json::Map::with_capacity(obj.len() + 4);
+    for (k, v) in obj {
+        working.insert(k.clone(), v.clone());
+    }
+    // `from` is already there. Add `value` from `amount` for handlers
+    // that read `tx["value"]` (bond_endpoint, create_tailnet, deposit_to_tailnet).
+    let amount = match obj.get("amount") {
+        Some(Value::String(s)) => s.parse::<u64>().unwrap_or(0),
+        Some(Value::Number(n)) => n.as_u64().unwrap_or(0),
+        _ => 0,
+    };
+    working.insert("value".into(), json!(amount));
+
+    let method = if op == "deploy" {
+        "__deploy__".to_string()
+    } else if op == "call" {
+        let ed = obj
+            .get("encrypted_data")
+            .and_then(|x| x.as_str())
+            .ok_or("call envelope missing encrypted_data")?;
+        let payload: Value =
+            serde_json::from_str(ed).map_err(|e| format!("encrypted_data is not JSON: {e}"))?;
+        let m = payload
+            .get("method")
+            .and_then(|x| x.as_str())
+            .ok_or("encrypted_data.method missing")?
+            .to_string();
+        let params = payload
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(vec![]));
+        working.insert("method".into(), json!(m));
+        working.insert("params".into(), params);
+        m
+    } else {
+        // Non-call, non-deploy op_types (standard, stealth, claim, …)
+        // are no-ops in this mock — they don't dispatch to apply_*
+        // handlers, just get accepted and recorded.
+        op.clone()
+    };
+    Ok((Value::Object(working), method, op))
+}
+
+/// Synthesize a deployed-contract address. Mirrors what the real chain
+/// does via `octra_computeContractAddress` (bytecode + deployer + nonce),
+/// but the mock isn't a real VM, so we just produce a deterministic
+/// `oct…` string from the inputs. Pads with leading '1' the way Base58
+/// addresses do so the result is the right length.
+fn synthesize_deploy_address(from: &str, bytecode: &str, nonce: u64) -> String {
+    let mut h = Sha256::new();
+    h.update(from.as_bytes());
+    h.update(b"::deploy::");
+    h.update(bytecode.as_bytes());
+    h.update(nonce.to_le_bytes());
+    let digest = h.finalize();
+    let body = hex::encode(digest);
+    // Trim/pad to 44 chars so the result is `oct` + 44 = 47 chars, the
+    // approximate length of real Octra addresses. The mock doesn't
+    // require exact length parity; consumers just round-trip the value.
+    let padded = if body.len() >= 44 {
+        body[..44].to_string()
+    } else {
+        let mut s = String::with_capacity(44);
+        for _ in body.len()..44 {
+            s.push('1');
+        }
+        s.push_str(&body);
+        s
+    };
+    format!("oct{padded}")
+}
+
 fn octra_submit(app: &AppState, params: &Value) -> Result<Value, String> {
     let arr = params.as_array().ok_or("params not array")?;
     let tx = arr.first().ok_or("tx missing")?;
-    let method = tx
-        .get("method")
-        .and_then(|x| x.as_str())
-        .ok_or("method missing")?
-        .to_string();
+    let (working, method, op_type) = normalize_submission(tx)?;
+    let tx = &working;
     let from = tx
         .get("from")
         .and_then(|x| x.as_str())
@@ -389,6 +496,44 @@ fn octra_submit(app: &AppState, params: &Value) -> Result<Value, String> {
     let mut hash_bytes = Sha256::new();
     hash_bytes.update(serde_json::to_vec(tx).unwrap_or_default());
     let hash = hex::encode(hash_bytes.finalize());
+
+    // Special case for op_type=deploy: no apply_* handler, just
+    // synthesize a deploy address. Real Octra returns one via
+    // `octra_computeContractAddress`; the mock simulates the same
+    // shape so deploy flows complete end-to-end.
+    if op_type == "deploy" {
+        let bytecode = tx
+            .get("encrypted_data")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let nonce = tx
+            .get("nonce")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let address = synthesize_deploy_address(&from, bytecode, nonce);
+        let event = json!({
+            "name": "ContractDeployed",
+            "address": &address,
+        });
+        {
+            let mut s = app.state.write();
+            s.txs.insert(
+                hash.clone(),
+                TxRow {
+                    method: "__deploy__".into(),
+                    from,
+                    events: vec![event],
+                    status: "confirmed".into(),
+                },
+            );
+            s.epoch += 1;
+        }
+        return Ok(json!({
+            "hash": hash,
+            "status": "confirmed",
+            "address": address,
+        }));
+    }
 
     let events = match method.as_str() {
         "register_device" => apply_register_device(app, tx, &from)?,
