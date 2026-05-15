@@ -427,20 +427,17 @@ fn normalize_submission(tx: &Value) -> Result<(Value, String, String), String> {
     let method = if op == "deploy" {
         "__deploy__".to_string()
     } else if op == "call" {
-        let ed = obj
+        // Real Octra contract-call envelope: encrypted_data is the
+        // bare method name, message is the JSON-encoded params array.
+        let m = obj
             .get("encrypted_data")
             .and_then(|x| x.as_str())
-            .ok_or("call envelope missing encrypted_data")?;
-        let payload: Value =
-            serde_json::from_str(ed).map_err(|e| format!("encrypted_data is not JSON: {e}"))?;
-        let m = payload
-            .get("method")
-            .and_then(|x| x.as_str())
-            .ok_or("encrypted_data.method missing")?
+            .ok_or("call envelope missing encrypted_data (method)")?
             .to_string();
-        let params = payload
-            .get("params")
-            .cloned()
+        let params = obj
+            .get("message")
+            .and_then(|x| x.as_str())
+            .map(|s| serde_json::from_str::<Value>(s).unwrap_or_else(|_| Value::Array(vec![])))
             .unwrap_or_else(|| Value::Array(vec![]));
         working.insert("method".into(), json!(m));
         working.insert("params".into(), params);

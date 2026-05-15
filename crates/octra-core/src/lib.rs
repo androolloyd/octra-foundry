@@ -4,11 +4,15 @@
 //! This crate intentionally stays *very* small: only the bits that have
 //! no OctraVPN-specific dependency surface live here. Today that's:
 //!
-//!   - [`address`] — Octra `oct…` address codec (SHA-256 of an Ed25519
-//!     pubkey, base58-encoded with `1`-padding).
-//!   - [`sig`]     — Ed25519 keypair / sign / verify primitives.
-//!   - [`coverage`] — A `Mutex<Option<Recorder>>` global the mock chain
-//!     and the AML coverage report wire together.
+//!   - [`address`]    — Octra `oct…` address codec (SHA-256 of an Ed25519
+//!                      pubkey, base58-encoded with `1`-padding).
+//!   - [`sig`]        — Ed25519 keypair / sign / verify primitives.
+//!   - [`coverage`]   — A `Mutex<Option<Recorder>>` global the mock chain
+//!                      and the AML coverage report wire together.
+//!   - [`tx`]         — Canonical Octra transaction signing / verification.
+//!   - [`util`]       — Tracing init, HKDF subkey derivation, secret-file
+//!                      loading.
+//!   - [`wallet_enc`] — Passphrase-protected wallet secret envelope.
 //!
 //! Everything OctraVPN-specific (sessions, receipts, onion routing,
 //! validator oracle, RPC, …) stays in `octravpn-core`.
@@ -16,6 +20,9 @@
 pub mod address;
 pub mod coverage;
 pub mod sig;
+pub mod tx;
+pub mod util;
+pub mod wallet_enc;
 
 pub use address::{Address, ADDRESS_LEN};
 pub use sig::{KeyPair, PublicKey, Signature};
