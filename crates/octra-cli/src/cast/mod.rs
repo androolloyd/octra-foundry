@@ -8,6 +8,7 @@
 pub mod abi;
 pub mod circle;
 pub mod hash;
+pub mod pvac;
 pub mod tx;
 pub mod wallet;
 
@@ -112,6 +113,14 @@ pub enum CastCmd {
     /// predict / deploy / info / asset / asset-key / key.
     #[command(subcommand)]
     Circle(circle::CircleCmd),
+    /// Register a PVAC (HFHE) pubkey for the wallet behind `--key`
+    /// via the per-wallet `octra_registerPvacPubkey` JSON-RPC.
+    ///
+    /// The signed message is exactly
+    /// `"register_pvac|" + addr + "|" + sha256_hex(pvac_pk_blob)` —
+    /// see `cast::pvac` for the canonical-format rationale.
+    #[command(name = "register-pvac")]
+    RegisterPvac(pvac::RegisterPvacArgs),
 }
 
 pub fn dispatch(cmd: CastCmd) -> Result<()> {
@@ -168,6 +177,7 @@ pub fn dispatch(cmd: CastCmd) -> Result<()> {
             rpc_url,
         } => cast_rpc(&method, &args, &rpc_url),
         CastCmd::Circle(c) => circle::dispatch(c),
+        CastCmd::RegisterPvac(a) => pvac::dispatch(&a),
     }
 }
 
