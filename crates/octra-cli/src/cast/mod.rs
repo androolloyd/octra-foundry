@@ -6,6 +6,7 @@
 //! integration tests.
 
 pub mod abi;
+pub mod circle;
 pub mod hash;
 pub mod tx;
 pub mod wallet;
@@ -107,6 +108,10 @@ pub enum CastCmd {
         #[arg(long, env = "OCTRA_RPC_URL", default_value = DEFAULT_RPC_URL)]
         rpc_url: String,
     },
+    /// Octra Circles (Isolated Execution Environment) ops:
+    /// predict / deploy / info / asset / asset-key / key.
+    #[command(subcommand)]
+    Circle(circle::CircleCmd),
 }
 
 pub fn dispatch(cmd: CastCmd) -> Result<()> {
@@ -162,6 +167,7 @@ pub fn dispatch(cmd: CastCmd) -> Result<()> {
             args,
             rpc_url,
         } => cast_rpc(&method, &args, &rpc_url),
+        CastCmd::Circle(c) => circle::dispatch(c),
     }
 }
 

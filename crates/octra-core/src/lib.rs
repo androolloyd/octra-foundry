@@ -18,6 +18,7 @@
 //! validator oracle, RPC, …) stays in `octravpn-core`.
 
 pub mod address;
+pub mod circle;
 pub mod coverage;
 pub mod sig;
 pub mod tx;
