@@ -181,4 +181,58 @@ mod tests {
         // so legacy callers using sha256(display) keep working.
         let _ = Address::from_display("not a real address");
     }
+
+    // ====================================================================
+    // Property-based harnesses
+    // ====================================================================
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 1024,
+            max_global_rejects: 200_000,
+            .. ProptestConfig::default()
+        })]
+
+        /// `Address::from_pubkey` is a *function*: same pubkey always
+        /// produces the same `oct…` display and canonical bytes.
+        #[test]
+        fn prop_from_pubkey_deterministic(pk in prop::array::uniform32(any::<u8>())) {
+            let a = Address::from_pubkey(&pk);
+            let b = Address::from_pubkey(&pk);
+            prop_assert_eq!(a.display(), b.display());
+            prop_assert_eq!(a.as_bytes(), b.as_bytes());
+        }
+
+        /// **Shape invariant** for any pubkey.
+        #[test]
+        fn prop_address_shape(pk in prop::array::uniform32(any::<u8>())) {
+            let a = Address::from_pubkey(&pk);
+            prop_assert!(a.display().starts_with(ADDRESS_PREFIX));
+            prop_assert_eq!(a.display().len(), ADDRESS_TOTAL_LEN);
+        }
+
+        /// **Round-trip:** `from_pubkey` → `try_from_display` recovers
+        /// the same canonical 32 bytes.
+        #[test]
+        fn prop_display_round_trip(pk in prop::array::uniform32(any::<u8>())) {
+            let a = Address::from_pubkey(&pk);
+            let parsed = Address::try_from_display(a.display()).unwrap();
+            prop_assert_eq!(parsed.as_bytes(), a.as_bytes());
+            prop_assert_eq!(parsed.display(), a.display());
+        }
+
+        /// Distinct pubkeys produce distinct addresses (assuming no
+        /// SHA-256 collision; bounded fuzz).
+        #[test]
+        fn prop_distinct_pubkeys_distinct_addresses(
+            a in prop::array::uniform32(any::<u8>()),
+            b in prop::array::uniform32(any::<u8>()),
+        ) {
+            prop_assume!(a != b);
+            let aa = Address::from_pubkey(&a);
+            let bb = Address::from_pubkey(&b);
+            prop_assert_ne!(aa.as_bytes(), bb.as_bytes());
+        }
+    }
 }

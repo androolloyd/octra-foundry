@@ -48,6 +48,10 @@ unreachable_pub         = "warn"
 unused_must_use         = "deny"
 trivial_casts           = "warn"
 trivial_numeric_casts   = "warn"
+# `kani` is the cfg name the Kani symbolic-execution tool sets on the
+# rustc invocation it owns. We use `#[cfg(kani)]` to gate Kani-only
+# harnesses; tell the unexpected_cfgs lint not to complain.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.package]
 version = "0.1.0"

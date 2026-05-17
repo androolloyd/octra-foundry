@@ -604,4 +604,206 @@ mod tests {
         )
         .unwrap();
     }
+
+    // ====================================================================
+    // Property-based harnesses (would-be Kani: see verify.rs)
+    // ====================================================================
+    use proptest::prelude::*;
+
+    /// Strategy producing a JSON-stringifiable Octra address-ish string.
+    fn addr_strategy() -> impl Strategy<Value = String> {
+        // 1..=47 ascii printable that won't break JSON quoting.
+        "[a-zA-Z0-9]{1,47}".prop_map(String::from)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 1024,
+            max_global_rejects: 200_000,
+            .. ProptestConfig::default()
+        })]
+
+        /// **canonical_bytes is a function.** Same input value ⇒ same
+        /// output bytes. No nondeterminism from HashMap ordering
+        /// (serde_json::Map preserves insertion order in `to_string`,
+        /// but this property pins the contract so a future migration
+        /// can't quietly regress).
+        #[test]
+        fn prop_canonical_bytes_is_function(
+            from in addr_strategy(),
+            to in addr_strategy(),
+            amount in any::<u64>(),
+            nonce in any::<u64>(),
+            ou in any::<u64>(),
+            timestamp in 0.0f64..1.0e12,
+            with_msg in any::<bool>(),
+        ) {
+            // Build a structured Value once, then ask canonical_bytes
+            // for it twice — must be byte-identical.
+            let mut tx = json!({
+                "from": from,
+                "to_": to,
+                "amount": amount.to_string(),
+                "nonce": nonce,
+                "ou": ou.to_string(),
+                "timestamp": timestamp,
+                "op_type": "standard",
+            });
+            if with_msg {
+                tx.as_object_mut().unwrap().insert("message".into(), json!("note"));
+            }
+            let a = canonical_bytes(&tx).unwrap();
+            let b = canonical_bytes(&tx).unwrap();
+            prop_assert_eq!(a, b);
+        }
+
+        /// **canonical_bytes is order-invariant on the OctraTx fields**
+        /// when sourced from the legacy `kind:contract_call` shape: re-
+        /// ordering fields in the legacy input must NOT change the
+        /// signed bytes (since they're projected through `to_octra_tx`
+        /// before serialisation).
+        #[test]
+        fn prop_canonical_bytes_legacy_shape_order_invariant(
+            method in "[a-zA-Z_]{1,16}",
+            value in any::<u64>(),
+            fee in any::<u64>(),
+            nonce in any::<u64>(),
+            timestamp in 0.0f64..1.0e12,
+        ) {
+            // A: insertion order F1.
+            let v1 = json!({
+                "kind": "contract_call",
+                "from": "octFROM",
+                "to": "octTO",
+                "method": method,
+                "params": [],
+                "value": value,
+                "fee": fee,
+                "nonce": nonce,
+                "timestamp": timestamp,
+            });
+            // B: insertion order F2.
+            let v2 = json!({
+                "timestamp": timestamp,
+                "nonce": nonce,
+                "fee": fee,
+                "value": value,
+                "params": [],
+                "method": method,
+                "to": "octTO",
+                "from": "octFROM",
+                "kind": "contract_call",
+            });
+            let a = canonical_bytes(&v1).unwrap();
+            let b = canonical_bytes(&v2).unwrap();
+            prop_assert_eq!(a, b);
+        }
+
+        /// `Address::from_pubkey` is a function — equal pubkeys
+        /// produce equal display strings.
+        #[test]
+        fn prop_address_from_pubkey_function(pk in prop::array::uniform32(any::<u8>())) {
+            let a = crate::address::Address::from_pubkey(&pk);
+            let b = crate::address::Address::from_pubkey(&pk);
+            prop_assert_eq!(a.display(), b.display());
+            prop_assert_eq!(a.as_bytes(), b.as_bytes());
+            prop_assert!(a.display().starts_with("oct"));
+            prop_assert_eq!(a.display().len(), 47);
+        }
+
+        /// Round-trip: `Address::from_pubkey` → `try_from_display`
+        /// → equal canonical bytes.
+        #[test]
+        fn prop_address_display_round_trip(pk in prop::array::uniform32(any::<u8>())) {
+            let a = crate::address::Address::from_pubkey(&pk);
+            let b = crate::address::Address::try_from_display(a.display()).unwrap();
+            prop_assert_eq!(a.as_bytes(), b.as_bytes());
+            prop_assert_eq!(a.display(), b.display());
+        }
+
+        /// `sign_call` + `verify_envelope_signature` always succeeds
+        /// for a freshly-signed tx whose `from` matches the signing
+        /// keypair.
+        #[test]
+        fn prop_sign_verify_roundtrip(
+            to in addr_strategy(),
+            amount in 0u64..1_000_000_000,
+            ou in 0u64..1_000_000_000,
+            nonce in any::<u64>(),
+            timestamp in 0.0f64..1.0e12,
+            method in "[a-zA-Z_]{1,16}",
+        ) {
+            let kp = KeyPair::generate();
+            let from = crate::address::Address::from_pubkey(&kp.public.0)
+                .display().to_string();
+            // Build an OctraTx-shaped envelope directly to avoid the
+            // legacy-shape translation path (covered by other props).
+            let tx = json!({
+                "from": from,
+                "to_": to,
+                "amount": amount.to_string(),
+                "nonce": nonce,
+                "ou": ou.to_string(),
+                "timestamp": timestamp,
+                "op_type": "call",
+                "encrypted_data": method,
+            });
+            let signed = sign_call(&kp, tx).unwrap();
+            verify_envelope_signature(&signed).unwrap();
+        }
+
+        /// **Tamper-rejection property.** Any modification of the
+        /// signed-over fields after signing MUST cause verification
+        /// to fail (signature was over the old bytes).
+        #[test]
+        fn prop_sign_verify_rejects_tamper(
+            amount in 1u64..1_000_000,
+            tampered in 1u64..1_000_000,
+        ) {
+            prop_assume!(amount != tampered);
+            let kp = KeyPair::generate();
+            let from = crate::address::Address::from_pubkey(&kp.public.0)
+                .display().to_string();
+            let tx = json!({
+                "from": from,
+                "to_": "octRECIP",
+                "amount": amount.to_string(),
+                "nonce": 1u64,
+                "ou": "1000",
+                "timestamp": 1.0,
+                "op_type": "standard",
+            });
+            let mut signed = sign_call(&kp, tx).unwrap();
+            signed["amount"] = json!(tampered.to_string());
+            prop_assert!(verify_envelope_signature(&signed).is_err());
+        }
+
+        /// **Wrong-pubkey rejection.** Verification must fail if the
+        /// envelope's `public_key` doesn't match the wallet that
+        /// produced the signature (or if `from` doesn't match the
+        /// derived address).
+        #[test]
+        fn prop_sign_verify_rejects_wrong_pubkey(
+            nonce in any::<u64>(),
+        ) {
+            let kp = KeyPair::generate();
+            let attacker = KeyPair::generate();
+            let from = crate::address::Address::from_pubkey(&kp.public.0)
+                .display().to_string();
+            let tx = json!({
+                "from": from,
+                "to_": "octRECIP",
+                "amount": "0",
+                "nonce": nonce,
+                "ou": "1000",
+                "timestamp": 1.0,
+                "op_type": "standard",
+            });
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            let mut signed = sign_call(&kp, tx).unwrap();
+            // Swap in the attacker's pubkey while keeping kp's signature.
+            signed["public_key"] = json!(STANDARD.encode(attacker.public.0));
+            prop_assert!(verify_envelope_signature(&signed).is_err());
+        }
+    }
 }

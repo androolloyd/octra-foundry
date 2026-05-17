@@ -29,6 +29,16 @@ zeroize            = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+proptest = { workspace = true }
+
+[features]
+# Marker feature for verification harnesses. Today's harnesses are
+# proptest-backed and live in `#[cfg(test)]` blocks (so they run via
+# `cargo test`); Kani harnesses (when Kani is installed) live in
+# `#[cfg(kani)]` blocks per the upstream convention. The feature flag
+# is a hook for future opt-in harness wiring and keeps the surface
+# discoverable; see `scripts/verify.sh` for the runner.
+verification = []
 
 [lints]
 workspace = true

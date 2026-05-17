@@ -68,10 +68,28 @@ fn wallet_sign_returns_base64() {
     assert_eq!(sig.len(), 88, "got: {sig}");
 }
 
+/// The default (no `--out`, no `--show-secret`) refuses to leak.
+/// This is the v2 hardening: previously `cast wallet new` printed the
+/// secret to stderr by default.
 #[test]
-fn wallet_new_stdout_form() {
-    cmd()
+fn wallet_new_default_refuses_to_print_secret() {
+    let out = cmd()
         .args(["cast", "wallet", "new"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "should refuse without --out/--show-secret");
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("refusing to emit secret material"),
+        "expected refusal message; got: {err}"
+    );
+}
+
+/// Explicit opt-in: `--show-secret` still prints the secret to stderr.
+#[test]
+fn wallet_new_show_secret_opts_in() {
+    cmd()
+        .args(["cast", "wallet", "new", "--show-secret"])
         .assert()
         .success()
         .stdout(contains("\"address\""))

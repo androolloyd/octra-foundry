@@ -8,7 +8,7 @@ use ed25519_dalek::{Signature as DalekSig, Signer, SigningKey, Verifier, Verifyi
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, Bytes};
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::{CoreError, CoreResult};
 
@@ -42,17 +42,29 @@ impl KeyPair {
         Signature(self.secret.sign(msg).to_bytes())
     }
 
-    pub fn secret_bytes(&self) -> [u8; 32] {
-        self.secret.to_bytes()
+    /// Export the 32-byte ed25519 secret.
+    ///
+    /// The return type is `Zeroizing<[u8; 32]>` (from the `zeroize`
+    /// crate): the buffer is wiped to zero when the wrapper drops, so
+    /// the caller's stack frame doesn't retain the secret after the
+    /// expression ends. Callers can `*kp.secret_bytes()` to copy out
+    /// into another `Zeroizing` wrapper, but copying into a plain
+    /// `[u8; 32]` is the pattern this return type discourages.
+    pub fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.secret.to_bytes())
     }
 }
 
 impl Drop for KeyPair {
     fn drop(&mut self) {
-        // SigningKey already zeroizes on drop in dalek 2.x; this is for
-        // belt-and-suspenders in case we change backends.
-        let mut bytes = self.secret.to_bytes();
-        bytes.zeroize();
+        // `SigningKey` already zeroizes on drop in `ed25519-dalek` 2.x
+        // (it derives `ZeroizeOnDrop`). We keep this empty `Drop` impl
+        // around purely as a tripwire: if a future migration swaps the
+        // crypto backend for one that doesn't zeroize on drop, this
+        // explicit `impl Drop` is the conspicuous place to notice. The
+        // body intentionally does NOT call `zeroize` on a stack copy —
+        // that would only zero the *copy*, not the original, and the
+        // misleading optics were a v1.1 audit finding.
     }
 }
 

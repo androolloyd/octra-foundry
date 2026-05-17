@@ -3,6 +3,7 @@
 
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::Zeroize;
 
 use crate::{wallet_enc, CoreError, CoreResult};
 
@@ -37,44 +38,67 @@ pub fn now_unix_secs() -> u64 {
 
 /// Decode a hex string into a fixed-size byte array. The input must be
 /// exactly `2 * N` hex digits.
+///
+/// The intermediate `Vec<u8>` produced by `hex::decode` is zeroized
+/// before the function returns, so secret hex inputs don't leave a
+/// plaintext copy in the heap's free list. Callers that decode public
+/// data pay only the cost of one memset; callers that decode secret
+/// data get the protection automatically.
 pub fn hex_to_array<const N: usize>(s: &str, what: &str) -> CoreResult<[u8; N]> {
-    let bytes =
+    let mut bytes =
         hex::decode(s).map_err(|e| CoreError::InvalidEncoding(format!("{what} hex: {e}")))?;
-    if bytes.len() != N {
-        return Err(CoreError::InvalidLength {
+    let result = if bytes.len() == N {
+        let mut out = [0u8; N];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    } else {
+        Err(CoreError::InvalidLength {
             expected: N,
             actual: bytes.len(),
-        });
-    }
-    let mut out = [0u8; N];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+        })
+    };
+    bytes.zeroize();
+    result
 }
 
 /// Read a 32-byte secret from disk. Accepts:
 ///   - a v1 encrypted envelope (passphrase from `WALLET_PASSPHRASE_ENV`)
 ///   - raw 32 bytes
 ///   - 64 hex digits (with optional trailing whitespace)
+///
+/// All intermediate buffers that contain secret material (the raw file
+/// bytes, the hex-decoded `Vec<u8>` inside `hex_to_array`, the env-var
+/// passphrase string) are wiped before this function returns so the
+/// allocator's free list doesn't retain a copy.
 pub fn read_secret_32(path: &str) -> CoreResult<[u8; 32]> {
-    let raw =
+    let mut raw =
         std::fs::read(path).map_err(|e| CoreError::InvalidEncoding(format!("read {path}: {e}")))?;
     if wallet_enc::looks_like_envelope(&raw) {
-        let pass = std::env::var(WALLET_PASSPHRASE_ENV).map_err(|_| {
+        let mut pass = std::env::var(WALLET_PASSPHRASE_ENV).map_err(|_| {
             CoreError::InvalidEncoding(format!(
                 "{path} is encrypted; set {WALLET_PASSPHRASE_ENV} to decrypt"
             ))
         })?;
-        return wallet_enc::decrypt_secret(&raw, &pass);
+        let r = wallet_enc::decrypt_secret(&raw, &pass);
+        pass.zeroize();
+        raw.zeroize();
+        return r;
     }
     if raw.len() == 32 {
         let mut out = [0u8; 32];
         out.copy_from_slice(&raw);
+        raw.zeroize();
         return Ok(out);
     }
-    let s = std::str::from_utf8(&raw)
-        .map_err(|e| CoreError::InvalidEncoding(format!("non-utf8 secret: {e}")))?
-        .trim();
-    hex_to_array::<32>(s, "secret file")
+    // Hex-encoded file path: parse, then wipe.
+    let r = (|| {
+        let s = std::str::from_utf8(&raw)
+            .map_err(|e| CoreError::InvalidEncoding(format!("non-utf8 secret: {e}")))?
+            .trim();
+        hex_to_array::<32>(s, "secret file")
+    })();
+    raw.zeroize();
+    r
 }
 
 /// Env var: set to `json` to emit JSON-formatted logs.

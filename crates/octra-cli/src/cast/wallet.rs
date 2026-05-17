@@ -19,10 +19,17 @@ use crate::io::{dump_json, read_secret_hex, write_to};
 pub enum WalletCmd {
     /// Generate a fresh ed25519 keypair.
     New {
-        /// Output path for the 32-byte hex secret. If omitted, prints
-        /// the secret + address to stdout (the secret is on stderr).
+        /// Output path for the 32-byte hex secret. If omitted, the
+        /// command refuses unless `--show-secret` is also passed —
+        /// emitting raw secret material to a terminal by default is
+        /// a common shell-history / log-capture footgun.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Print the secret to stderr (used when `--out` is omitted).
+        /// Off by default so a naive `cast wallet new` doesn't leak
+        /// the secret into shell history or a `2>&1` capture.
+        #[arg(long, default_value_t = false)]
+        show_secret: bool,
     },
     /// Sign arbitrary bytes with a key file.
     Sign {
@@ -57,7 +64,7 @@ pub enum PubkeyFormat {
 
 pub fn dispatch(cmd: WalletCmd) -> Result<()> {
     match cmd {
-        WalletCmd::New { out } => new_wallet(out.as_deref()),
+        WalletCmd::New { out, show_secret } => new_wallet(out.as_deref(), show_secret),
         WalletCmd::Sign { key, message } => sign_message(&key, &message),
         WalletCmd::Addr { key } => print_address(&key),
         WalletCmd::Pubkey { key, format } => print_pubkey(&key, format),
@@ -65,8 +72,10 @@ pub fn dispatch(cmd: WalletCmd) -> Result<()> {
 }
 
 fn print_pubkey(p: &Path, format: PubkeyFormat) -> Result<()> {
-    let bytes = read_secret_hex(p)?;
+    use zeroize::Zeroize;
+    let mut bytes = read_secret_hex(p)?;
     let kp = KeyPair::from_secret_bytes(&bytes);
+    bytes.zeroize();
     let out = match format {
         PubkeyFormat::Hex => hex::encode(kp.public.0),
         PubkeyFormat::Base64 => STANDARD.encode(kp.public.0),
@@ -75,13 +84,18 @@ fn print_pubkey(p: &Path, format: PubkeyFormat) -> Result<()> {
     Ok(())
 }
 
-fn new_wallet(out: Option<&Path>) -> Result<()> {
+fn new_wallet(out: Option<&Path>, show_secret: bool) -> Result<()> {
     let kp = KeyPair::generate();
-    let secret = hex::encode(kp.secret_bytes());
     let addr = Address::from_pubkey(&kp.public.0).display().to_string();
     let public = hex::encode(kp.public.0);
     if let Some(p) = out {
+        // `secret_bytes()` returns `Zeroizing<[u8;32]>` so the buffer
+        // is wiped when this scope exits; the hex-encoded `String`
+        // also gets manually zeroized after writing.
+        let mut secret = hex::encode(kp.secret_bytes());
         write_to(p, &secret).context("write wallet")?;
+        use zeroize::Zeroize;
+        secret.zeroize();
         // Mode bits aren't enforced on Windows, but on Unix the file
         // contains a private key, so tighten read perms.
         #[cfg(unix)]
@@ -97,10 +111,24 @@ fn new_wallet(out: Option<&Path>) -> Result<()> {
             "public_key": public,
         }));
     } else {
-        // Print to stdout in a wallet-friendly shape; the secret is
-        // intentionally on stderr so naive `> wallet.json` redirection
-        // doesn't leak it into a shared log file.
+        // No `--out`: refuse unless the caller opts into explicit
+        // stderr emission. Default-refusing here is the v2 hardening:
+        // `cast wallet new` used to drop the secret into stderr by
+        // default, which is the wrong default for a tool that's
+        // routinely run inside shell history.
+        if !show_secret {
+            return Err(anyhow!(
+                "refusing to emit secret material on stderr by default.\n\
+                 \n\
+                 Either pass `--out <PATH>` to write the hex secret to a file\n\
+                 (recommended; the file will be chmod 0600 on Unix), or pass\n\
+                 `--show-secret` to print it to stderr regardless."
+            ));
+        }
+        let mut secret = hex::encode(kp.secret_bytes());
         eprintln!("{secret}");
+        use zeroize::Zeroize;
+        secret.zeroize();
         dump_json(&json!({
             "address": addr,
             "public_key": public,
@@ -110,8 +138,10 @@ fn new_wallet(out: Option<&Path>) -> Result<()> {
 }
 
 fn sign_message(key: &Path, msg: &str) -> Result<()> {
-    let secret = read_secret_hex(key)?;
+    use zeroize::Zeroize;
+    let mut secret = read_secret_hex(key)?;
     let kp = KeyPair::from_secret_bytes(&secret);
+    secret.zeroize();
     let bytes = decode_hex_or_utf8(msg);
     let sig = kp.sign(&bytes);
     println!("{}", STANDARD.encode(sig.0));
@@ -119,8 +149,10 @@ fn sign_message(key: &Path, msg: &str) -> Result<()> {
 }
 
 fn print_address(key: &Path) -> Result<()> {
-    let secret = read_secret_hex(key)?;
+    use zeroize::Zeroize;
+    let mut secret = read_secret_hex(key)?;
     let kp = KeyPair::from_secret_bytes(&secret);
+    secret.zeroize();
     let addr = Address::from_pubkey(&kp.public.0).display().to_string();
     println!("{addr}");
     Ok(())
@@ -139,12 +171,17 @@ fn decode_hex_or_utf8(s: &str) -> Vec<u8> {
 
 /// Public re-export so tests can roundtrip without parsing CLI args.
 pub fn derive_address(secret_hex: &str) -> Result<String> {
-    let bytes = hex::decode(secret_hex.trim().trim_start_matches("0x"))?;
-    if bytes.len() != 32 {
-        return Err(anyhow!("secret must be 32 bytes"));
-    }
-    let mut k = [0u8; 32];
-    k.copy_from_slice(&bytes);
-    let kp = KeyPair::from_secret_bytes(&k);
-    Ok(Address::from_pubkey(&kp.public.0).display().to_string())
+    use zeroize::Zeroize;
+    let mut bytes = hex::decode(secret_hex.trim().trim_start_matches("0x"))?;
+    let out = if bytes.len() == 32 {
+        let mut k = [0u8; 32];
+        k.copy_from_slice(&bytes);
+        let kp = KeyPair::from_secret_bytes(&k);
+        k.zeroize();
+        Ok(Address::from_pubkey(&kp.public.0).display().to_string())
+    } else {
+        Err(anyhow!("secret must be 32 bytes"))
+    };
+    bytes.zeroize();
+    out
 }

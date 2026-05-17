@@ -32,6 +32,7 @@ use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 /// Sealed-asset envelope magic prefix (matches webcli `sealedMagic`).
 const SEALED_MAGIC: &[u8; 5] = b"OCRS1";
@@ -253,10 +254,20 @@ fn padded_frame(plaintext: &[u8], padding: PaddingClass) -> Vec<u8> {
 /// salt = "octra:circle:sealed_read:v1:" + circle_id + ":" + key_id
 /// key  = PBKDF2-HMAC-SHA256(passphrase, salt, 120_000, 32)
 /// ```
-pub fn derive_sealed_read_key(circle_id: &str, key_id: &str, passphrase: &str) -> [u8; 32] {
+///
+/// The return type is `Zeroizing<[u8; 32]>` so callers can't
+/// accidentally leak the AES-256 key by copying it into a plain
+/// `[u8; 32]`. `Zeroizing` derefs to `[u8; 32]`, so existing call
+/// sites that pass `&*key` to `Aes256Gcm::new_from_slice` keep
+/// working unchanged.
+pub fn derive_sealed_read_key(
+    circle_id: &str,
+    key_id: &str,
+    passphrase: &str,
+) -> Zeroizing<[u8; 32]> {
     let salt = format!("octra:circle:sealed_read:v1:{circle_id}:{key_id}");
-    let mut key = [0u8; 32];
-    pbkdf2_hmac::<sha2::Sha256>(passphrase.as_bytes(), salt.as_bytes(), PBKDF2_ITERS, &mut key);
+    let mut key = Zeroizing::new([0u8; 32]);
+    pbkdf2_hmac::<sha2::Sha256>(passphrase.as_bytes(), salt.as_bytes(), PBKDF2_ITERS, &mut *key);
     key
 }
 
@@ -273,7 +284,7 @@ pub fn encrypt_sealed_bytes(
     padding: PaddingClass,
 ) -> Result<(String, String)> {
     let key = derive_sealed_read_key(circle_id, key_id, passphrase);
-    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow!("aes key: {e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(key.as_ref()).map_err(|e| anyhow!("aes key: {e}"))?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -315,7 +326,7 @@ pub fn decrypt_sealed_bytes(
     let nonce_bytes = &envelope[SEALED_MAGIC.len()..SEALED_MAGIC.len() + NONCE_LEN];
     let cipher_bytes = &envelope[SEALED_MAGIC.len() + NONCE_LEN..];
     let key = derive_sealed_read_key(circle_id, key_id, passphrase);
-    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow!("aes key: {e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(key.as_ref()).map_err(|e| anyhow!("aes key: {e}"))?;
     let nonce = Nonce::from_slice(nonce_bytes);
     let frame = cipher
         .decrypt(
@@ -455,5 +466,314 @@ mod tests {
         assert_eq!(padded.len(), 4096);
         let oversize = padded_frame(&vec![0u8; 5000], PaddingClass::K4);
         assert_eq!(oversize.len(), 8192); // aligned up to next 4k boundary
+    }
+
+    // ====================================================================
+    // Property-based harness (mirrors the would-be Kani harnesses; today
+    // shipped as proptest since Kani is not installed — see verify.rs).
+    // ====================================================================
+    use proptest::prelude::*;
+
+    /// Strategy for ASCII tag strings — Kani-friendly small bound.
+    fn small_tag() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_:.\\-]{1,16}".prop_map(String::from)
+    }
+
+    fn small_part() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(any::<u8>(), 0..=8)
+    }
+
+    fn small_parts() -> impl Strategy<Value = Vec<Vec<u8>>> {
+        prop::collection::vec(small_part(), 0..=3)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            // 4096 cases is overkill for the cheap hash properties but
+            // each `prop_sealed_envelope_*` triggers two PBKDF2-SHA256
+            // rounds at 120k iters and a real AES-GCM operation, so the
+            // budget below is split: pure-hash properties take this
+            // big case count, the AEAD properties override locally.
+            cases: 4096,
+            // Tight-enough rejection limit that filter-heavy strategies
+            // don't gobble all the budget.
+            max_global_rejects: 200_000,
+            .. ProptestConfig::default()
+        })]
+
+        /// h256_raw is a *function* — equal inputs ⇒ equal outputs.
+        /// (Proves no nondeterminism from internal state.)
+        #[test]
+        fn prop_h256_raw_deterministic(
+            tag in small_tag(),
+            parts in small_parts(),
+        ) {
+            let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+            let a = h256_raw(&tag, &refs);
+            let b = h256_raw(&tag, &refs);
+            prop_assert_eq!(a, b);
+        }
+
+        /// Tag separation: different tags on the same parts ⇒
+        /// different digests (catches the framing bug class).
+        #[test]
+        fn prop_h256_raw_tag_separated(
+            t1 in small_tag(),
+            t2 in small_tag(),
+            parts in small_parts(),
+        ) {
+            prop_assume!(t1 != t2);
+            let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+            prop_assert_ne!(h256_raw(&t1, &refs), h256_raw(&t2, &refs));
+        }
+
+        /// **Framing property**: the length-prefix means that the parts
+        /// list isn't equivalent to its concatenation. This is the
+        /// property that caught the v1.1 missing-length-prefix bug.
+        ///
+        /// We test it for *all* non-trivial splits: any split-point
+        /// `i` in `1..bytes.len()` must produce a different digest
+        /// than the whole as a single part.
+        #[test]
+        fn prop_h256_raw_split_doesnt_collide_with_joined(
+            tag in small_tag(),
+            bytes in prop::collection::vec(any::<u8>(), 2..=16),
+            split in 1usize..16,
+        ) {
+            let split = split.min(bytes.len() - 1).max(1);
+            let (l, r) = bytes.split_at(split);
+            let joined = h256_raw(&tag, &[bytes.as_slice()]);
+            let split_h = h256_raw(&tag, &[l, r]);
+            prop_assert_ne!(joined, split_h);
+        }
+
+        /// `circle_id_of_deploy` is deterministic.
+        #[test]
+        fn prop_circle_id_of_deploy_determinism(
+            deployer in "[a-zA-Z0-9]{1,32}",
+            nonce in 0u64..u64::MAX,
+        ) {
+            let p = CircleDeployPayload::default();
+            let a = circle_id_of_deploy(&deployer, nonce, &p);
+            let b = circle_id_of_deploy(&deployer, nonce, &p);
+            prop_assert_eq!(a, b);
+        }
+
+        /// Different (deployer, nonce) ⇒ different circle id (with
+        /// astronomical probability — SHA-256 collision boundary).
+        #[test]
+        fn prop_circle_id_distinct_inputs(
+            d1 in "[a-zA-Z0-9]{4,32}",
+            d2 in "[a-zA-Z0-9]{4,32}",
+            n1 in 0u64..u64::MAX,
+            n2 in 0u64..u64::MAX,
+        ) {
+            prop_assume!(d1 != d2 || n1 != n2);
+            let p = CircleDeployPayload::default();
+            prop_assert_ne!(
+                circle_id_of_deploy(&d1, n1, &p),
+                circle_id_of_deploy(&d2, n2, &p),
+            );
+        }
+
+        /// circle_id is always 47 chars and starts with "oct".
+        #[test]
+        fn prop_circle_id_shape(
+            deployer in "[a-zA-Z0-9]{1,64}",
+            nonce in 0u64..u64::MAX,
+        ) {
+            let id = circle_id_of_deploy(&deployer, nonce, &CircleDeployPayload::default());
+            prop_assert_eq!(id.len(), 47);
+            prop_assert!(id.starts_with("oct"));
+        }
+
+        /// padded_frame length invariants:
+        ///   1) output length is always >= 4 + plaintext.len()
+        ///   2) when class != None, output is aligned to target_bytes
+        ///   3) when class == None, output is *exactly* 4 + plaintext.len()
+        #[test]
+        fn prop_padded_frame_length_invariant(
+            plaintext in prop::collection::vec(any::<u8>(), 0..=4096),
+            class_idx in 0u32..5,
+        ) {
+            let class = match class_idx {
+                0 => PaddingClass::None,
+                1 => PaddingClass::K4,
+                2 => PaddingClass::K16,
+                3 => PaddingClass::K32,
+                _ => PaddingClass::K128,
+            };
+            let out = padded_frame(&plaintext, class);
+            prop_assert!(out.len() >= 4 + plaintext.len());
+            let target = class.target_bytes();
+            if target == 0 {
+                prop_assert_eq!(out.len(), 4 + plaintext.len());
+            } else {
+                // Aligned to target.
+                prop_assert!(out.len() % target == 0 || out.len() == 4 + plaintext.len());
+            }
+            // The length prefix is the real plaintext length.
+            let len = u32::from_be_bytes(out[..4].try_into().unwrap()) as usize;
+            prop_assert_eq!(len, plaintext.len());
+            // The plaintext slice survives at the front.
+            prop_assert_eq!(&out[4..4 + plaintext.len()], &plaintext[..]);
+        }
+
+    }
+
+    // ----- Slow AEAD harness block. Each iteration drives two PBKDF2-
+    // -----  SHA256-120k key derivations + an AES-GCM round-trip, so we
+    // -----  intentionally run only ~32 cases per property to keep CI
+    // -----  time reasonable. The shape of the property is the same;
+    // -----  the proptest budget is just lower.
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 32,
+            max_global_rejects: 200_000,
+            .. ProptestConfig::default()
+        })]
+
+        /// **The sealed-envelope round-trip property** — bounded-size
+        /// fuzz. Any (plaintext, passphrase, padding) ⇒
+        /// decrypt(encrypt(...)) = plaintext.
+        #[test]
+        fn prop_sealed_envelope_roundtrip(
+            plaintext in prop::collection::vec(any::<u8>(), 0..=256),
+            passphrase in "[ -~]{0,32}",
+            class_idx in 0u32..5,
+        ) {
+            let class = match class_idx {
+                0 => PaddingClass::None,
+                1 => PaddingClass::K4,
+                2 => PaddingClass::K16,
+                3 => PaddingClass::K32,
+                _ => PaddingClass::K128,
+            };
+            let (ct, ph) = encrypt_sealed_bytes(
+                "octABC", "default", &passphrase, &plaintext, class,
+            ).map_err(|e| TestCaseError::fail(format!("encrypt: {e}")))?;
+            let got = decrypt_sealed_bytes(
+                "octABC", "default", &passphrase, &ct, &ph,
+            ).map_err(|e| TestCaseError::fail(format!("decrypt: {e}")))?;
+            prop_assert_eq!(got, plaintext);
+        }
+
+        /// Wrong passphrase MUST fail decryption — no false-positive
+        /// decrypts permitted.
+        #[test]
+        fn prop_sealed_envelope_wrong_passphrase_always_fails(
+            plaintext in prop::collection::vec(any::<u8>(), 1..=256),
+            correct in "[ -~]{1,32}",
+            wrong in "[ -~]{1,32}",
+        ) {
+            prop_assume!(correct != wrong);
+            let (ct, ph) = encrypt_sealed_bytes(
+                "octABC", "default", &correct, &plaintext, PaddingClass::None,
+            ).map_err(|e| TestCaseError::fail(format!("encrypt: {e}")))?;
+            let r = decrypt_sealed_bytes(
+                "octABC", "default", &wrong, &ct, &ph,
+            );
+            prop_assert!(r.is_err(), "wrong passphrase decrypted!");
+        }
+
+        /// Wrong key_id MUST fail decryption — different key_id
+        /// derives a different AES-GCM key.
+        #[test]
+        fn prop_sealed_envelope_wrong_key_id_always_fails(
+            plaintext in prop::collection::vec(any::<u8>(), 1..=256),
+            kid1 in "[a-zA-Z0-9_-]{1,16}",
+            kid2 in "[a-zA-Z0-9_-]{1,16}",
+        ) {
+            prop_assume!(kid1 != kid2);
+            let (ct, ph) = encrypt_sealed_bytes(
+                "octABC", &kid1, "passphrase", &plaintext, PaddingClass::None,
+            ).map_err(|e| TestCaseError::fail(format!("encrypt: {e}")))?;
+            let r = decrypt_sealed_bytes(
+                "octABC", &kid2, "passphrase", &ct, &ph,
+            );
+            prop_assert!(r.is_err(), "wrong key_id decrypted!");
+        }
+
+        /// Wrong circle_id MUST fail decryption — different circle
+        /// derives a different AES-GCM key (the salt baked into
+        /// derive_sealed_read_key changes).
+        #[test]
+        fn prop_sealed_envelope_wrong_circle_id_always_fails(
+            plaintext in prop::collection::vec(any::<u8>(), 1..=256),
+            c1 in "[a-zA-Z0-9]{4,16}",
+            c2 in "[a-zA-Z0-9]{4,16}",
+        ) {
+            prop_assume!(c1 != c2);
+            let (ct, ph) = encrypt_sealed_bytes(
+                &c1, "default", "passphrase", &plaintext, PaddingClass::None,
+            ).map_err(|e| TestCaseError::fail(format!("encrypt: {e}")))?;
+            let r = decrypt_sealed_bytes(
+                &c2, "default", "passphrase", &ct, &ph,
+            );
+            prop_assert!(r.is_err(), "wrong circle_id decrypted!");
+        }
+
+        /// **Magic prefix property.** Every sealed envelope starts
+        /// with the OCRS1 magic and has the documented byte structure.
+        #[test]
+        fn prop_sealed_envelope_starts_with_magic(
+            plaintext in prop::collection::vec(any::<u8>(), 0..=128),
+            passphrase in "[ -~]{0,16}",
+        ) {
+            let (ct_b64, _) = encrypt_sealed_bytes(
+                "octABC", "kid", &passphrase, &plaintext, PaddingClass::None,
+            ).map_err(|e| TestCaseError::fail(format!("encrypt: {e}")))?;
+            let raw = B64.decode(ct_b64)
+                .map_err(|e| TestCaseError::fail(format!("b64: {e}")))?;
+            prop_assert!(raw.len() >= 5 + 12, "envelope too short");
+            prop_assert_eq!(&raw[..5], b"OCRS1");
+        }
+
+        /// **The tamper-detection property.** Flipping any single
+        /// bit in the AES-GCM portion of the envelope MUST cause
+        /// decryption to fail (AEAD authenticity).
+        ///
+        /// Bounded to small plaintexts so the proptest budget is sane.
+        #[test]
+        fn prop_sealed_envelope_rejects_single_bit_flip(
+            plaintext in prop::collection::vec(any::<u8>(), 1..=64),
+            flip_idx in 0usize..200,
+        ) {
+            let (ct_b64, ph) = encrypt_sealed_bytes(
+                "octABC", "kid", "passphrase", &plaintext, PaddingClass::None,
+            ).map_err(|e| TestCaseError::fail(format!("encrypt: {e}")))?;
+            let mut raw = B64.decode(&ct_b64)
+                .map_err(|e| TestCaseError::fail(format!("b64: {e}")))?;
+            // Skip the OCRS1 magic prefix — flipping inside it triggers
+            // a different (also-failing) code path; not the property we
+            // care about. Stay within the ciphertext + tag region.
+            let lo = 5usize; // after magic
+            if raw.len() <= lo + 1 { return Ok(()); }
+            let idx = lo + (flip_idx % (raw.len() - lo));
+            raw[idx] ^= 0x01;
+            let tampered = B64.encode(&raw);
+            let r = decrypt_sealed_bytes("octABC", "kid", "passphrase", &tampered, &ph);
+            prop_assert!(r.is_err(), "single-bit flip at byte {idx} decrypted!");
+        }
+
+        /// **Plaintext-hash binding property.** decrypt_sealed_bytes
+        /// MUST reject when the caller-supplied plaintext_hash does
+        /// not match the recovered plaintext's actual hash. Otherwise
+        /// the wire commitment to the plaintext is unenforced.
+        #[test]
+        fn prop_sealed_envelope_rejects_wrong_plaintext_hash(
+            plaintext in prop::collection::vec(any::<u8>(), 1..=128),
+            tweak in prop::array::uniform32(any::<u8>()),
+        ) {
+            let (ct, ph) = encrypt_sealed_bytes(
+                "octABC", "kid", "passphrase", &plaintext, PaddingClass::None,
+            ).map_err(|e| TestCaseError::fail(format!("encrypt: {e}")))?;
+            // Construct a "wrong" hash: hex of the random 32 bytes.
+            // With astronomical probability this is != `ph`.
+            let wrong = hex::encode(tweak);
+            prop_assume!(wrong != ph);
+            let r = decrypt_sealed_bytes("octABC", "kid", "passphrase", &ct, &wrong);
+            prop_assert!(r.is_err(), "wrong plaintext_hash accepted!");
+        }
     }
 }

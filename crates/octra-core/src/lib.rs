@@ -25,6 +25,11 @@ pub mod tx;
 pub mod util;
 pub mod wallet_enc;
 
+// Formal-verification harness module. Today's content is Kani-only
+// (`#[cfg(kani)]`); see the module-level doc for the proptest fallback
+// story and `scripts/verify.sh` for the runner.
+pub mod verify;
+
 pub use address::{Address, ADDRESS_LEN};
 pub use sig::{KeyPair, PublicKey, Signature};
 

@@ -8,22 +8,36 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
+use zeroize::Zeroize;
 
-/// Read a 32-byte hex-encoded secret from `path` (with optional `0x` prefix).
+/// Read a 32-byte hex-encoded secret from `path` (with optional `0x`
+/// prefix).
+///
+/// All intermediate buffers that hold the secret bytes — the `String`
+/// from `read_to_string` and the `Vec<u8>` from `hex::decode` — are
+/// wiped before this function returns, so the allocator's free list
+/// does not retain a plaintext copy of the wallet secret.
 pub fn read_secret_hex(path: &Path) -> Result<[u8; 32]> {
-    let s =
+    let mut s =
         fs::read_to_string(path).with_context(|| format!("read key file: {}", path.display()))?;
     let stripped = s.trim().trim_start_matches("0x");
-    let bytes = hex::decode(stripped).context("key file is not hex")?;
-    if bytes.len() != 32 {
-        return Err(anyhow!(
-            "key file must be 32 bytes (got {} bytes)",
-            bytes.len()
-        ));
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+    let parse: Result<[u8; 32]> = (|| {
+        let mut bytes = hex::decode(stripped).context("key file is not hex")?;
+        let r = if bytes.len() == 32 {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&bytes);
+            Ok(out)
+        } else {
+            Err(anyhow!(
+                "key file must be 32 bytes (got {} bytes)",
+                bytes.len()
+            ))
+        };
+        bytes.zeroize();
+        r
+    })();
+    s.zeroize();
+    parse
 }
 
 /// Pretty-print a JSON value with two-space indent.
