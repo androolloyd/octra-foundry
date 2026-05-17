@@ -45,6 +45,17 @@ pub enum CoreError {
     Crypto(String),
     #[error("rpc error: {0}")]
     Rpc(String),
+    /// The on-disk secret at `path` is plaintext (raw bytes or hex). The
+    /// operator-side strict loader refuses to use it as-is. `suggested_cmd`
+    /// is the exact CLI invocation that wraps it under the passphrase
+    /// envelope; tooling that surfaces this error should print
+    /// `suggested_cmd` so the operator has a one-line copy-paste to fix.
+    /// Threat-model ref: docs/v2-threat-model.md P1-6.
+    #[error("plaintext key on disk at {path}; re-seal via: {suggested_cmd}")]
+    PlaintextKeyOnDisk {
+        path: String,
+        suggested_cmd: String,
+    },
 }
 
 pub type CoreResult<T> = std::result::Result<T, CoreError>;
