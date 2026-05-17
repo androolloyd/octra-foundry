@@ -57,6 +57,7 @@ authors = ["octra-foundry contributors"]
 rust-version = "1.75"
 
 [workspace.dependencies]
+aes-gcm            = "0.10"
 anyhow             = "1"
 axum               = "0.7"
 base64             = "0.22"

@@ -24,8 +24,21 @@
 //! result up to 44 chars (matches the JS quirk), and prefixes the
 //! literal `oct` so the id looks just like an Octra wallet address.
 
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Nonce};
+use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use pbkdf2::pbkdf2_hmac;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+/// Sealed-asset envelope magic prefix (matches webcli `sealedMagic`).
+const SEALED_MAGIC: &[u8; 5] = b"OCRS1";
+/// PBKDF2-SHA256 iteration count, matches reference webcli.
+const PBKDF2_ITERS: u32 = 120_000;
+/// AES-GCM nonce length in bytes.
+const NONCE_LEN: usize = 12;
 
 /// `h256_raw('tag', parts) -> [u8; 32]` — the TupleHash-style framed
 /// SHA-256 used everywhere in the circles wire format.
@@ -158,6 +171,179 @@ pub fn circle_id_of_deploy(
     format!("oct{part}")
 }
 
+// ============================================================
+// Sealed asset envelope (sealed_read circles)
+// ============================================================
+
+/// Padding class for sealed assets. Matches webcli `paddingClass`.
+/// `None` means no padding (frame ships at its natural length).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PaddingClass {
+    None,
+    K4,
+    K16,
+    K32,
+    K128,
+}
+
+impl PaddingClass {
+    /// `None`, "4k", "16k", "32k", "128k" — case-insensitive.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "" | "none" => Self::None,
+            "4k" => Self::K4,
+            "16k" => Self::K16,
+            "32k" => Self::K32,
+            "128k" => Self::K128,
+            _ => return None,
+        })
+    }
+
+    /// String form used in the on-chain `padding_class` field. Empty
+    /// string for `None` so the asset_put_encrypted message just
+    /// omits it via `if !padding_class.empty()`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::K4 => "4k",
+            Self::K16 => "16k",
+            Self::K32 => "32k",
+            Self::K128 => "128k",
+        }
+    }
+
+    fn target_bytes(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::K4 => 4096,
+            Self::K16 => 16384,
+            Self::K32 => 32768,
+            Self::K128 => 131072,
+        }
+    }
+}
+
+/// Frame the plaintext with a u32be length prefix, then pad to the
+/// requested class with random bytes. Matches webcli `paddedFrame`.
+fn padded_frame(plaintext: &[u8], padding: PaddingClass) -> Vec<u8> {
+    let mut bare = Vec::with_capacity(4 + plaintext.len());
+    let len = u32::try_from(plaintext.len()).expect("plaintext < 4 GiB");
+    bare.extend_from_slice(&len.to_be_bytes());
+    bare.extend_from_slice(plaintext);
+    let target = padding.target_bytes();
+    if target == 0 {
+        return bare;
+    }
+    let aligned = bare.len().div_ceil(target) * target;
+    if aligned <= bare.len() {
+        return bare;
+    }
+    let pad = aligned - bare.len();
+    let mut out = bare;
+    let start = out.len();
+    out.resize(start + pad, 0);
+    rand::thread_rng().fill_bytes(&mut out[start..]);
+    out
+}
+
+/// Derive the AES-GCM read-key for an `(circle_id, key_id, passphrase)`
+/// tuple. Matches the webcli `deriveReadKey`:
+///
+/// ```text
+/// salt = "octra:circle:sealed_read:v1:" + circle_id + ":" + key_id
+/// key  = PBKDF2-HMAC-SHA256(passphrase, salt, 120_000, 32)
+/// ```
+pub fn derive_sealed_read_key(circle_id: &str, key_id: &str, passphrase: &str) -> [u8; 32] {
+    let salt = format!("octra:circle:sealed_read:v1:{circle_id}:{key_id}");
+    let mut key = [0u8; 32];
+    pbkdf2_hmac::<sha2::Sha256>(passphrase.as_bytes(), salt.as_bytes(), PBKDF2_ITERS, &mut key);
+    key
+}
+
+/// Encrypt a plaintext blob into the sealed-asset envelope format.
+/// Returns `(ciphertext_b64, plaintext_hash_hex)` — exactly the two
+/// fields the `circle_asset_put_encrypted` tx needs.
+///
+/// Envelope wire: `"OCRS1" || nonce[12] || AES-GCM(key, nonce, paddedFrame(plaintext))`.
+pub fn encrypt_sealed_bytes(
+    circle_id: &str,
+    key_id: &str,
+    passphrase: &str,
+    plaintext: &[u8],
+    padding: PaddingClass,
+) -> Result<(String, String)> {
+    let key = derive_sealed_read_key(circle_id, key_id, passphrase);
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow!("aes key: {e}"))?;
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let frame = padded_frame(plaintext, padding);
+    let ct = cipher
+        .encrypt(
+            nonce,
+            Payload {
+                msg: &frame,
+                aad: &[],
+            },
+        )
+        .map_err(|e| anyhow!("aes-gcm encrypt: {e}"))?;
+    let mut envelope = Vec::with_capacity(SEALED_MAGIC.len() + NONCE_LEN + ct.len());
+    envelope.extend_from_slice(SEALED_MAGIC);
+    envelope.extend_from_slice(&nonce_bytes);
+    envelope.extend_from_slice(&ct);
+    Ok((B64.encode(envelope), hex::encode(Sha256::digest(plaintext))))
+}
+
+/// Inverse of [`encrypt_sealed_bytes`]. Verifies the plaintext hash
+/// matches the metadata.
+pub fn decrypt_sealed_bytes(
+    circle_id: &str,
+    key_id: &str,
+    passphrase: &str,
+    ciphertext_b64: &str,
+    expected_plaintext_hash_hex: &str,
+) -> Result<Vec<u8>> {
+    let envelope = B64
+        .decode(ciphertext_b64.trim())
+        .context("base64 decode envelope")?;
+    if envelope.len() < SEALED_MAGIC.len() + NONCE_LEN {
+        return Err(anyhow!("sealed envelope too short"));
+    }
+    if &envelope[..SEALED_MAGIC.len()] != SEALED_MAGIC {
+        return Err(anyhow!("invalid sealed envelope magic"));
+    }
+    let nonce_bytes = &envelope[SEALED_MAGIC.len()..SEALED_MAGIC.len() + NONCE_LEN];
+    let cipher_bytes = &envelope[SEALED_MAGIC.len() + NONCE_LEN..];
+    let key = derive_sealed_read_key(circle_id, key_id, passphrase);
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow!("aes key: {e}"))?;
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let frame = cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: cipher_bytes,
+                aad: &[],
+            },
+        )
+        .map_err(|e| anyhow!("aes-gcm decrypt (wrong passphrase / key_id / circle_id?): {e}"))?;
+    if frame.len() < 4 {
+        return Err(anyhow!("frame too short"));
+    }
+    let plain_len =
+        u32::from_be_bytes(frame[..4].try_into().expect("4-byte prefix")) as usize;
+    if plain_len > frame.len() - 4 {
+        return Err(anyhow!("frame length prefix exceeds payload"));
+    }
+    let plaintext = frame[4..4 + plain_len].to_vec();
+    let actual_hash = hex::encode(Sha256::digest(&plaintext));
+    if !actual_hash.eq_ignore_ascii_case(expected_plaintext_hash_hex.trim()) {
+        return Err(anyhow!(
+            "plaintext hash mismatch (got {actual_hash}, expected {expected_plaintext_hash_hex})"
+        ));
+    }
+    Ok(plaintext)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +404,56 @@ mod tests {
         let id1 = circle_id_of_deploy("octABC", 1, &p);
         let id2 = circle_id_of_deploy("octABC", 2, &p);
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn sealed_envelope_roundtrips() {
+        let plaintext = b"hello operator policy";
+        let (ct_b64, ph_hex) = encrypt_sealed_bytes(
+            "octABC", "default", "correct horse battery staple",
+            plaintext, PaddingClass::None,
+        )
+        .expect("encrypt");
+        let recovered = decrypt_sealed_bytes(
+            "octABC", "default", "correct horse battery staple",
+            &ct_b64, &ph_hex,
+        )
+        .expect("decrypt");
+        assert_eq!(recovered, plaintext);
+    }
+
+    #[test]
+    fn sealed_envelope_wrong_passphrase_fails() {
+        let (ct, ph) = encrypt_sealed_bytes(
+            "octABC", "k1", "right", b"secret", PaddingClass::K4,
+        )
+        .unwrap();
+        assert!(decrypt_sealed_bytes("octABC", "k1", "wrong", &ct, &ph).is_err());
+    }
+
+    #[test]
+    fn sealed_envelope_starts_with_magic() {
+        let (ct_b64, _) = encrypt_sealed_bytes("c", "k", "p", b"x", PaddingClass::None).unwrap();
+        let bytes = B64.decode(ct_b64).unwrap();
+        assert_eq!(&bytes[..5], b"OCRS1");
+    }
+
+    #[test]
+    fn padding_class_round_trip() {
+        for s in ["", "4k", "16k", "32k", "128k"] {
+            let pc = PaddingClass::from_str_opt(s).unwrap();
+            assert_eq!(pc.as_str(), if s == "none" { "" } else { s });
+        }
+        assert!(PaddingClass::from_str_opt("bogus").is_none());
+    }
+
+    #[test]
+    fn padded_frame_pads_to_class() {
+        let bare = padded_frame(b"hi", PaddingClass::None);
+        assert_eq!(bare.len(), 6); // u32be(2) + "hi"
+        let padded = padded_frame(b"hi", PaddingClass::K4);
+        assert_eq!(padded.len(), 4096);
+        let oversize = padded_frame(&vec![0u8; 5000], PaddingClass::K4);
+        assert_eq!(oversize.len(), 8192); // aligned up to next 4k boundary
     }
 }
