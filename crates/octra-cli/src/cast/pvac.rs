@@ -63,9 +63,19 @@ pub struct RegisterPvacArgs {
 
     /// PVAC pubkey blob, base64-encoded. Comes from the operator's
     /// PVAC keygen sidecar — its internal structure is opaque to this
-    /// command.
-    #[arg(long = "pvac-pk")]
-    pub pvac_pk: String,
+    /// command. Mutually exclusive with `--pvac-pk-file`; one is
+    /// required.
+    #[arg(long = "pvac-pk", conflicts_with = "pvac_pk_file")]
+    pub pvac_pk: Option<String>,
+
+    /// Read the base64 PVAC pubkey from `<PATH>` instead of the
+    /// command line. Use this when the pubkey is several MB long
+    /// (default for PVAC's hypergraph LWE params — the blob exceeds
+    /// the OS argv length cap of 256 KiB). The file is read verbatim
+    /// then trimmed of trailing whitespace. May optionally be
+    /// prefixed with `hfhe_v1|`; the prefix is stripped.
+    #[arg(long = "pvac-pk-file", conflicts_with = "pvac_pk")]
+    pub pvac_pk_file: Option<std::path::PathBuf>,
 
     /// Optional KAT (Known-Answer Test) blob, hex-encoded. Passed
     /// through to the RPC as the final positional param. When omitted
@@ -206,9 +216,29 @@ pub fn build_signed_registration(
 
 /// CLI entrypoint.
 pub fn dispatch(args: &RegisterPvacArgs) -> Result<()> {
+    // Resolve the pubkey from --pvac-pk OR --pvac-pk-file. Real PVAC
+    // pubkeys at production params are ~4 MB base64, which overflows
+    // the OS argv cap, so file-based supply is the common path.
+    let raw_pubkey = match (&args.pvac_pk, &args.pvac_pk_file) {
+        (Some(s), None) => s.trim().to_string(),
+        (None, Some(p)) => {
+            let body = std::fs::read_to_string(p)
+                .with_context(|| format!("read --pvac-pk-file {}", p.display()))?;
+            body.trim().to_string()
+        }
+        (Some(_), Some(_)) => return Err(anyhow!("--pvac-pk and --pvac-pk-file are mutually exclusive")),
+        (None, None) => return Err(anyhow!("one of --pvac-pk or --pvac-pk-file is required")),
+    };
+    // The sidecar emits "hfhe_v1|<base64>". Accept both shapes —
+    // strip the prefix when present so the chain sees the canonical
+    // bare-base64 blob.
+    let pubkey_b64 = raw_pubkey
+        .strip_prefix("hfhe_v1|")
+        .unwrap_or(&raw_pubkey)
+        .to_string();
     let signed = build_signed_registration(
         &args.key,
-        &args.pvac_pk,
+        &pubkey_b64,
         args.kat_hex.as_deref(),
     )?;
 
