@@ -105,6 +105,19 @@ pub struct ChainState {
     /// Encrypted earnings for v2 proxies. Mock-cleartext as u64,
     /// same simplification as v1's `earnings`.
     pub enc_earnings_v2: HashMap<String, u64>,
+
+    // ============================================================
+    // v3 (Circles-as-IEE) state.
+    //
+    // Plaintext byte store backing the `circle_asset` RPC. Keyed by
+    // `(circle_id, path)` → raw bytes. Tests and downstream callers
+    // populate via `AppState::insert_circle_asset`; the `circle_asset`
+    // dispatch arm reads from here. Sealed (ciphertext) assets do not
+    // live here — those are fetched via the v2-era
+    // `circle_asset_ciphertext_by_resource_key` RPC, which is keyed
+    // differently and not modelled by this mock.
+    // ============================================================
+    pub circle_assets: HashMap<(String, String), Vec<u8>>,
 }
 
 /// Default operator bond floor mirrored from `program/main.aml`.
@@ -236,6 +249,19 @@ impl AppState {
     pub fn set_owner(&self, addr: impl Into<String>) {
         self.state.write().owner = Some(addr.into());
     }
+
+    /// Seed a plaintext asset for `circle_asset(circle_id, path)`
+    /// lookups. Mirrors the in-test fixture stores v3 client tests
+    /// have been carrying as a workaround.
+    pub fn insert_circle_asset(
+        &self,
+        circle_id: impl Into<String>,
+        path: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+    ) {
+        let key = (circle_id.into(), path.into());
+        self.state.write().circle_assets.insert(key, bytes.into());
+    }
 }
 
 pub fn build_router(app: AppState) -> Router {
@@ -277,6 +303,7 @@ async fn rpc_handler(State(app): State<AppState>, Json(req): Json<RpcReq>) -> im
         "octra_compileAml" => octra_compile_aml(&req.params),
         "octra_compileAmlMulti" => octra_compile_aml_multi(&req.params),
         "epoch_get" => Ok(epoch_get(&app, &req.params)),
+        "circle_asset" => circle_asset(&app, &req.params),
         _ => Err(format!("unknown method: {}", req.method)),
     };
     match result {
@@ -355,6 +382,38 @@ fn test_set_owner(app: &AppState, params: &Value) -> Value {
     };
     app.set_owner(addr);
     Value::Bool(true)
+}
+
+/// `circle_asset(circle_id, path)` — v3 plaintext asset fetch.
+///
+/// Wire-equivalent to the production RPC dispatched by
+/// `cast circle asset` (see `octra-cli/src/cast/circle.rs::asset`).
+/// Returns one of the response shapes the v3 client's
+/// `fetch_circle_asset_bytes` tolerates: `{"plaintext": <utf8>}` on
+/// hit, JSON `null` on miss. Bytes are expected to be UTF-8 (v3's
+/// canonical assets are JSON); non-UTF-8 fixtures will surface as an
+/// RPC error rather than silently mangle.
+fn circle_asset(app: &AppState, params: &Value) -> Result<Value, String> {
+    let arr = params.as_array().ok_or("params not array")?;
+    let circle_id = arr
+        .first()
+        .and_then(Value::as_str)
+        .ok_or("circle_id missing")?
+        .to_string();
+    let path = arr
+        .get(1)
+        .and_then(Value::as_str)
+        .ok_or("path missing")?
+        .to_string();
+    let s = app.state.read();
+    match s.circle_assets.get(&(circle_id, path)) {
+        Some(bytes) => {
+            let text = std::str::from_utf8(bytes)
+                .map_err(|e| format!("circle_asset bytes not utf-8: {e}"))?;
+            Ok(json!({ "plaintext": text }))
+        }
+        None => Ok(Value::Null),
+    }
 }
 
 fn octra_balance(app: &AppState, params: &Value) -> Result<Value, String> {
@@ -2638,4 +2697,96 @@ pub async fn serve(addr: SocketAddr, program_addr: String) -> anyhow::Result<()>
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{circle_asset, AppState, ChainState};
+    use parking_lot::RwLock;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    fn make_app() -> AppState {
+        AppState {
+            state: Arc::new(RwLock::new(ChainState {
+                epoch: 1,
+                ..Default::default()
+            })),
+            program_addr: "octPROGRAM".to_string(),
+        }
+    }
+
+    #[test]
+    fn circle_asset_returns_plaintext_when_seeded() {
+        let app = make_app();
+        app.insert_circle_asset("octCIRCLE", "/policy.json", br#"{"v":1}"#.to_vec());
+
+        let v = circle_asset(&app, &json!(["octCIRCLE", "/policy.json"]))
+            .expect("circle_asset succeeds");
+        assert_eq!(v, json!({ "plaintext": r#"{"v":1}"# }));
+    }
+
+    #[test]
+    fn circle_asset_returns_null_when_unseeded() {
+        let app = make_app();
+        // Nothing seeded — miss must be `null`, matching the in-test
+        // v3 mock the canonical implementation is replacing.
+        let v = circle_asset(&app, &json!(["octCIRCLE", "/policy.json"]))
+            .expect("circle_asset succeeds");
+        assert_eq!(v, Value::Null);
+
+        // Wrong path on a seeded circle is still a miss.
+        app.insert_circle_asset("octCIRCLE", "/policy.json", b"x".to_vec());
+        let v = circle_asset(&app, &json!(["octCIRCLE", "/state-root.json"]))
+            .expect("circle_asset succeeds");
+        assert_eq!(v, Value::Null);
+    }
+
+    #[test]
+    fn circle_asset_isolates_circles() {
+        let app = make_app();
+        app.insert_circle_asset("octA", "/policy.json", b"alpha".to_vec());
+        app.insert_circle_asset("octB", "/policy.json", b"bravo".to_vec());
+
+        let a = circle_asset(&app, &json!(["octA", "/policy.json"]))
+            .expect("circle_asset(A) succeeds");
+        let b = circle_asset(&app, &json!(["octB", "/policy.json"]))
+            .expect("circle_asset(B) succeeds");
+
+        assert_eq!(a, json!({ "plaintext": "alpha" }));
+        assert_eq!(b, json!({ "plaintext": "bravo" }));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn circle_asset_isolates_paths() {
+        let app = make_app();
+        app.insert_circle_asset("octCIRCLE", "/policy.json", b"P".to_vec());
+        app.insert_circle_asset("octCIRCLE", "/state-root.json", b"S".to_vec());
+
+        let p = circle_asset(&app, &json!(["octCIRCLE", "/policy.json"]))
+            .expect("circle_asset(policy) succeeds");
+        let s = circle_asset(&app, &json!(["octCIRCLE", "/state-root.json"]))
+            .expect("circle_asset(state-root) succeeds");
+
+        assert_eq!(p, json!({ "plaintext": "P" }));
+        assert_eq!(s, json!({ "plaintext": "S" }));
+        assert_ne!(p, s);
+    }
+
+    #[test]
+    fn circle_asset_rejects_malformed_params() {
+        let app = make_app();
+        // Non-array params → error string.
+        let err = circle_asset(&app, &json!({"circle_id": "x"})).unwrap_err();
+        assert!(err.contains("not array"), "{err}");
+
+        // Missing path.
+        let err = circle_asset(&app, &json!(["octCIRCLE"])).unwrap_err();
+        assert!(err.contains("path missing"), "{err}");
+
+        // Missing circle_id.
+        let err = circle_asset(&app, &json!([])).unwrap_err();
+        assert!(err.contains("circle_id missing"), "{err}");
+    }
 }
