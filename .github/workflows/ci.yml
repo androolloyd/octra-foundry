@@ -1,0 +1,61 @@
+# octra-foundry CI — PR #241.
+#
+# Adds enforcement to the lint config that's been in
+# `octra-foundry/Cargo.toml` since the workspace shipped. Two prior
+# commits (`4dd5f4a clippy debt: octra-core + octra-mock-rpc -D
+# warnings clean`, `57861d7 clippy: clear -D warnings across the
+# foundry workspace`) verified the workspace passes locally; this
+# workflow ratchets that into a per-PR gate.
+#
+# Modeled on octra/.github/workflows/ci.yml.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Workspace `[workspace.lints]` already pins all + pedantic +
+      # nursery at warn; the `-D warnings` flag promotes to deny so
+      # this run matches the octra workspace's CI gate exactly.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --tests -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: cargo test --workspace
