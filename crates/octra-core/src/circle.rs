@@ -162,7 +162,7 @@ pub fn circle_id_of_deploy(
     } else if b58.is_empty() {
         "1".repeat(44)
     } else {
-        let need = (44 - b58.len() + b58.len() - 1) / b58.len();
+        let need = (44 - b58.len()).div_ceil(b58.len());
         let mut s = b58.clone();
         for _ in 0..need {
             s.push_str(&b58);
@@ -217,9 +217,9 @@ impl PaddingClass {
         match self {
             Self::None => 0,
             Self::K4 => 4096,
-            Self::K16 => 16384,
-            Self::K32 => 32768,
-            Self::K128 => 131072,
+            Self::K16 => 16_384,
+            Self::K32 => 32_768,
+            Self::K128 => 131_072,
         }
     }
 }

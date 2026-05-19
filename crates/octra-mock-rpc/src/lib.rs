@@ -496,8 +496,10 @@ fn normalize_submission(tx: &Value) -> Result<(Value, String, String), String> {
         let params = obj
             .get("message")
             .and_then(|x| x.as_str())
-            .map(|s| serde_json::from_str::<Value>(s).unwrap_or_else(|_| Value::Array(vec![])))
-            .unwrap_or_else(|| Value::Array(vec![]));
+            .map_or_else(
+                || Value::Array(vec![]),
+                |s| serde_json::from_str::<Value>(s).unwrap_or_else(|_| Value::Array(vec![])),
+            );
         working.insert("method".into(), json!(m));
         working.insert("params".into(), params);
         m
