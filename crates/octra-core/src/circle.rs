@@ -543,7 +543,8 @@ mod tests {
             let split = split.min(bytes.len() - 1).max(1);
             let (l, r) = bytes.split_at(split);
             let joined = h256_raw(&tag, &[bytes.as_slice()]);
-            let split_h = h256_raw(&tag, &[l, r]);
+            let parts: [&[u8]; 2] = <[&[u8]; 2]>::from((l, r));
+            let split_h = h256_raw(&tag, &parts);
             prop_assert_ne!(joined, split_h);
         }
 

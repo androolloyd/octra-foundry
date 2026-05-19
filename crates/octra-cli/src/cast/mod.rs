@@ -197,16 +197,13 @@ fn cast_transfer(
         .display()
         .to_string();
     let endpoint = rpc_client::endpoint_from_url(rpc_url);
-    let actual_nonce = match nonce {
-        Some(n) => n,
-        None => {
-            let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
-                .context("fetch balance for nonce")?;
-            bal.get("nonce")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-                + 1
-        }
+    let actual_nonce = if let Some(n) = nonce { n } else {
+        let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
+            .context("fetch balance for nonce")?;
+        bal.get("nonce")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            + 1
     };
     let mut tx = json!({
         "from": from,

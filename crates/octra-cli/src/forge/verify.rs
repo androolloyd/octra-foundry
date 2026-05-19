@@ -30,7 +30,7 @@ pub fn run(args: &VerifyArgs) -> Result<()> {
     let v = rpc_client::call(&endpoint, "contract_verify", json!([args.address, source]))
         .map_err(|e| anyhow!("contract_verify: {e}"))?;
     dump_json(&v);
-    if v.get("verified").and_then(|x| x.as_bool()) != Some(true) {
+    if v.get("verified").and_then(serde_json::Value::as_bool) != Some(true) {
         return Err(anyhow!("verification failed"));
     }
     Ok(())

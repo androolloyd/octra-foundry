@@ -226,13 +226,10 @@ fn deploy(args: &DeployArgs) -> Result<()> {
         .to_string();
     let endpoint = rpc_client::endpoint_from_url(&args.rpc_url);
 
-    let resolved_nonce = match args.nonce {
-        Some(n) => n,
-        None => {
-            let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
-                .context("fetch balance for nonce")?;
-            bal.get("nonce").and_then(Value::as_u64).unwrap_or(0) + 1
-        }
+    let resolved_nonce = if let Some(n) = args.nonce { n } else {
+        let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
+            .context("fetch balance for nonce")?;
+        bal.get("nonce").and_then(Value::as_u64).unwrap_or(0) + 1
     };
 
     let circle_id = circle_id_of_deploy(&from, resolved_nonce, &payload);
@@ -318,13 +315,10 @@ fn put_encrypted(args: &PutEncryptedArgs) -> Result<()> {
         .to_string();
     let endpoint = rpc_client::endpoint_from_url(&args.rpc_url);
 
-    let resolved_nonce = match args.nonce {
-        Some(n) => n,
-        None => {
-            let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
-                .context("fetch balance for nonce")?;
-            bal.get("nonce").and_then(Value::as_u64).unwrap_or(0) + 1
-        }
+    let resolved_nonce = if let Some(n) = args.nonce { n } else {
+        let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
+            .context("fetch balance for nonce")?;
+        bal.get("nonce").and_then(Value::as_u64).unwrap_or(0) + 1
     };
 
     let mut payload = json!({
