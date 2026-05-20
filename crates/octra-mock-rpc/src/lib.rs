@@ -21,6 +21,8 @@ use sha2::{Digest, Sha256};
 
 use octra_core::coverage as cov;
 
+pub mod aml;
+
 mod coverage {
     pub(crate) fn record(method: &str, branch: &str) {
         super::cov::record(method, branch);
@@ -118,6 +120,13 @@ pub struct ChainState {
     // differently and not modelled by this mock.
     // ============================================================
     pub circle_assets: HashMap<(String, String), Vec<u8>>,
+
+    /// PVAC pubkey registry, keyed by owner address. Populated by
+    /// `octra_registerPvacPubkey` (and seeded by tests). This is what
+    /// `aml::host_fhe::fhe_load_pk` queries. Storing the parsed
+    /// `PvacPubkey` rather than the raw wire bytes keeps the host-call
+    /// hot path off the JSON-RPC parse cost.
+    pub pvac_pubkeys: HashMap<String, aml::host_fhe::PvacPubkey>,
 }
 
 /// Default operator bond floor mirrored from `program/main.aml`.
@@ -304,6 +313,16 @@ async fn rpc_handler(State(app): State<AppState>, Json(req): Json<RpcReq>) -> im
         "octra_compileAmlMulti" => octra_compile_aml_multi(&req.params),
         "epoch_get" => Ok(epoch_get(&app, &req.params)),
         "circle_asset" => circle_asset(&app, &req.params),
+        // Honest mock-HFHE host calls. See `aml::host_fhe`.
+        "octra_registerPvacPubkey" => octra_register_pvac_pubkey(&app, &req.params),
+        "octra_pvacPubkey" => octra_pvac_pubkey(&app, &req.params),
+        "octra_fheLoadPk" => octra_fhe_load_pk(&app, &req.params),
+        "octra_fheEncrypt" => octra_fhe_encrypt(&app, &req.params),
+        "octra_fheAdd" => octra_fhe_add(&req.params),
+        "octra_fheAddConst" => octra_fhe_add_const(&app, &req.params),
+        "octra_fheVerifyZero" => octra_fhe_verify_zero(&app, &req.params),
+        "octra_fheDecrypt" => octra_fhe_decrypt(&app, &req.params),
+        "octra_fheMakeZeroProof" => octra_fhe_make_zero_proof(&app, &req.params),
         _ => Err(format!("unknown method: {}", req.method)),
     };
     match result {
@@ -416,6 +435,133 @@ fn circle_asset(app: &AppState, params: &Value) -> Result<Value, String> {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Honest mock-HFHE RPC surface (see crates/octra-mock-rpc/src/aml/host_fhe.rs)
+// ─────────────────────────────────────────────────────────────────────
+
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+/// `octra_registerPvacPubkey([addr])` — register a PVAC pubkey for
+/// `addr`. The mock derives the (deterministic) blob from `addr`
+/// itself; production `octra_registerPvacPubkey` accepts the operator-
+/// computed ~4 MiB blob directly. Returning the base64 blob lets
+/// callers round-trip via `octra_pvacPubkey`.
+fn octra_register_pvac_pubkey(app: &AppState, params: &Value) -> Result<Value, String> {
+    let arr = params.as_array().ok_or("params not array")?;
+    let addr = arr
+        .first()
+        .and_then(Value::as_str)
+        .ok_or("addr missing")?
+        .to_string();
+    let pk = aml::host_fhe::keygen_for_addr(&addr);
+    let blob = pk.as_bytes().to_vec();
+    app.state.write().pvac_pubkeys.insert(addr.clone(), pk);
+    Ok(json!({
+        "addr": addr,
+        "pubkey_b64": B64.encode(&blob),
+    }))
+}
+
+fn octra_pvac_pubkey(app: &AppState, params: &Value) -> Result<Value, String> {
+    let arr = params.as_array().ok_or("params not array")?;
+    let addr = arr.first().and_then(Value::as_str).ok_or("addr missing")?;
+    let s = app.state.read();
+    match s.pvac_pubkeys.get(addr) {
+        Some(pk) => Ok(json!({ "pubkey_b64": B64.encode(pk.as_bytes()) })),
+        None => Ok(Value::Null),
+    }
+}
+
+fn octra_fhe_load_pk(app: &AppState, params: &Value) -> Result<Value, String> {
+    let arr = params.as_array().ok_or("params not array")?;
+    let addr = arr.first().and_then(Value::as_str).ok_or("addr missing")?;
+    let s = app.state.read();
+    let pk = aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
+    Ok(json!({ "pubkey_b64": B64.encode(pk.as_bytes()) }))
+}
+
+fn octra_fhe_encrypt(app: &AppState, params: &Value) -> Result<Value, String> {
+    let arr = params.as_array().ok_or("params not array")?;
+    let addr = arr.first().and_then(Value::as_str).ok_or("addr missing")?;
+    let value = arr
+        .get(1)
+        .and_then(Value::as_u64)
+        .ok_or("value (u64) missing")?;
+    let s = app.state.read();
+    let pk =
+        aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
+    let ct = aml::host_fhe::encrypt_const(&pk, value);
+    Ok(json!({ "ct_b64": B64.encode(ct.as_bytes()) }))
+}
+
+fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
+    B64.decode(s).map_err(|e| format!("base64: {e}"))
+}
+
+fn octra_fhe_add(params: &Value) -> Result<Value, String> {
+    let arr = params.as_array().ok_or("params not array")?;
+    let a = b64_decode(arr.first().and_then(Value::as_str).ok_or("ct_a missing")?)?;
+    let b = b64_decode(arr.get(1).and_then(Value::as_str).ok_or("ct_b missing")?)?;
+    let ca = aml::host_fhe::fhe_deser(&a).map_err(|e| e.to_string())?;
+    let cb = aml::host_fhe::fhe_deser(&b).map_err(|e| e.to_string())?;
+    let sum = aml::host_fhe::fhe_add(&ca, &cb).map_err(|e| e.to_string())?;
+    Ok(json!({ "ct_b64": B64.encode(sum.as_bytes()) }))
+}
+
+fn octra_fhe_add_const(app: &AppState, params: &Value) -> Result<Value, String> {
+    let arr = params.as_array().ok_or("params not array")?;
+    let addr = arr.first().and_then(Value::as_str).ok_or("addr missing")?;
+    let ct_b = b64_decode(arr.get(1).and_then(Value::as_str).ok_or("ct missing")?)?;
+    let k = arr
+        .get(2)
+        .and_then(Value::as_u64)
+        .ok_or("const (u64) missing")?;
+    let s = app.state.read();
+    let pk =
+        aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
+    let ct = aml::host_fhe::fhe_deser(&ct_b).map_err(|e| e.to_string())?;
+    let r = aml::host_fhe::fhe_add_const(&pk, &ct, k).map_err(|e| e.to_string())?;
+    Ok(json!({ "ct_b64": B64.encode(r.as_bytes()) }))
+}
+
+fn octra_fhe_verify_zero(app: &AppState, params: &Value) -> Result<Value, String> {
+    let arr = params.as_array().ok_or("params not array")?;
+    let addr = arr.first().and_then(Value::as_str).ok_or("addr missing")?;
+    let ct_b = b64_decode(arr.get(1).and_then(Value::as_str).ok_or("ct missing")?)?;
+    let pf_b = b64_decode(arr.get(2).and_then(Value::as_str).ok_or("proof missing")?)?;
+    let s = app.state.read();
+    let pk =
+        aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
+    let ct = aml::host_fhe::fhe_deser(&ct_b).map_err(|e| e.to_string())?;
+    let proof = aml::host_fhe::ZeroProof::from_bytes(&pf_b).map_err(|e| e.to_string())?;
+    let ok = aml::host_fhe::fhe_verify_zero(&pk, &ct, &proof).map_err(|e| e.to_string())?;
+    Ok(json!({ "ok": ok }))
+}
+
+fn octra_fhe_decrypt(app: &AppState, params: &Value) -> Result<Value, String> {
+    let arr = params.as_array().ok_or("params not array")?;
+    let addr = arr.first().and_then(Value::as_str).ok_or("addr missing")?;
+    let ct_b = b64_decode(arr.get(1).and_then(Value::as_str).ok_or("ct missing")?)?;
+    let s = app.state.read();
+    let pk =
+        aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
+    let ct = aml::host_fhe::fhe_deser(&ct_b).map_err(|e| e.to_string())?;
+    let v = aml::host_fhe::decrypt(&pk, &ct);
+    Ok(json!({ "value": v }))
+}
+
+fn octra_fhe_make_zero_proof(app: &AppState, params: &Value) -> Result<Value, String> {
+    let arr = params.as_array().ok_or("params not array")?;
+    let addr = arr.first().and_then(Value::as_str).ok_or("addr missing")?;
+    let ct_b = b64_decode(arr.get(1).and_then(Value::as_str).ok_or("ct missing")?)?;
+    let s = app.state.read();
+    let pk =
+        aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
+    let ct = aml::host_fhe::fhe_deser(&ct_b).map_err(|e| e.to_string())?;
+    let proof = aml::host_fhe::make_zero_proof(&pk, &ct);
+    Ok(json!({ "proof_b64": B64.encode(proof.as_bytes()) }))
+}
+
 fn octra_balance(app: &AppState, params: &Value) -> Result<Value, String> {
     let arr = params.as_array().ok_or("params not array")?;
     let addr = arr.first().and_then(|x| x.as_str()).ok_or("addr missing")?;
@@ -493,13 +639,10 @@ fn normalize_submission(tx: &Value) -> Result<(Value, String, String), String> {
             .and_then(|x| x.as_str())
             .ok_or("call envelope missing encrypted_data (method)")?
             .to_string();
-        let params = obj
-            .get("message")
-            .and_then(|x| x.as_str())
-            .map_or_else(
-                || Value::Array(vec![]),
-                |s| serde_json::from_str::<Value>(s).unwrap_or_else(|_| Value::Array(vec![])),
-            );
+        let params = obj.get("message").and_then(|x| x.as_str()).map_or_else(
+            || Value::Array(vec![]),
+            |s| serde_json::from_str::<Value>(s).unwrap_or_else(|_| Value::Array(vec![])),
+        );
         working.insert("method".into(), json!(m));
         working.insert("params".into(), params);
         m
@@ -2166,7 +2309,30 @@ fn apply_claim_earnings_v2(app: &AppState, tx: &Value, from: &str) -> Result<Vec
         return Err("no keys registered".into());
     }
     let balance = s.enc_earnings_v2.get(from).copied().unwrap_or(0);
-    if balance != claimed {
+    // Honest HFHE path: when OCTRAVPN_E2E_USE_HFHE_MOCK is set, expect
+    // `proof` to be a base64-encoded mock-HFHE zero-proof over the
+    // delta ciphertext `enc(balance) - enc(claimed)`. Verifies via
+    // `aml::host_fhe::fhe_verify_zero` against the proxy's PVAC
+    // pubkey. Without the flag we keep the legacy plaintext check.
+    if std::env::var("OCTRAVPN_E2E_USE_HFHE_MOCK").is_ok() {
+        let pk = s
+            .pvac_pubkeys
+            .get(from)
+            .cloned()
+            .ok_or("pubkey not registered")?;
+        let bal_ct = aml::host_fhe::encrypt_const(&pk, balance);
+        let neg_claim = (!claimed).wrapping_add(1);
+        let delta = aml::host_fhe::fhe_add_const(&pk, &bal_ct, neg_claim)
+            .map_err(|e| e.to_string())?;
+        let pf_bytes = B64.decode(&proof).map_err(|e| format!("proof b64: {e}"))?;
+        let zp = aml::host_fhe::ZeroProof::from_bytes(&pf_bytes)
+            .map_err(|e| e.to_string())?;
+        let ok = aml::host_fhe::fhe_verify_zero(&pk, &delta, &zp)
+            .map_err(|e| e.to_string())?;
+        if !ok {
+            return Err("bad opening".into());
+        }
+    } else if balance != claimed {
         return Err("bad opening".into());
     }
     s.enc_earnings_v2.insert(from.to_string(), 0);
@@ -2750,10 +2916,10 @@ mod tests {
         app.insert_circle_asset("octA", "/policy.json", b"alpha".to_vec());
         app.insert_circle_asset("octB", "/policy.json", b"bravo".to_vec());
 
-        let a = circle_asset(&app, &json!(["octA", "/policy.json"]))
-            .expect("circle_asset(A) succeeds");
-        let b = circle_asset(&app, &json!(["octB", "/policy.json"]))
-            .expect("circle_asset(B) succeeds");
+        let a =
+            circle_asset(&app, &json!(["octA", "/policy.json"])).expect("circle_asset(A) succeeds");
+        let b =
+            circle_asset(&app, &json!(["octB", "/policy.json"])).expect("circle_asset(B) succeeds");
 
         assert_eq!(a, json!({ "plaintext": "alpha" }));
         assert_eq!(b, json!({ "plaintext": "bravo" }));
