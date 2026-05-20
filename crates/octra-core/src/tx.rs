@@ -858,9 +858,8 @@ mod tests {
         // Replay attempt: re-stamp for devnet while keeping the
         // mainnet-bound signature.
         signed["chain_id"] = json!(CHAIN_ID_DEVNET_STR);
-        let err = verify_envelope_signature(&signed)
-            .err()
-            .expect("cross-chain replay must fail verify");
+        let err =
+            verify_envelope_signature(&signed).expect_err("cross-chain replay must fail verify");
         let msg = format!("{err}");
         assert!(msg.contains("sig verify"), "unexpected error: {msg}");
     }
@@ -881,7 +880,7 @@ mod tests {
             "op_type": "standard",
             "chain_id": "",
         });
-        let err = canonical_bytes(&v).err().expect("empty chain_id must error");
+        let err = canonical_bytes(&v).expect_err("empty chain_id must error");
         let msg = format!("{err}");
         assert!(
             msg.contains("chain_id") && msg.contains("non-empty"),
@@ -989,11 +988,11 @@ mod tests {
         // Cross-format swap is rejected: dropping chain_id from a v2
         // envelope (or adding it to a v1 envelope) changes the
         // canonical bytes ⇒ sig fails.
-        let mut tampered = signed_v2.clone();
+        let mut tampered = signed_v2;
         tampered.as_object_mut().unwrap().remove("chain_id");
         assert!(verify_envelope_signature(&tampered).is_err());
 
-        let mut tampered = signed_v1.clone();
+        let mut tampered = signed_v1;
         tampered
             .as_object_mut()
             .unwrap()

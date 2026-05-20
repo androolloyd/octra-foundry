@@ -65,9 +65,11 @@ fn cross_chain_replay_rejected_by_mock() {
         "value": 1_000_000_000u64,
         "chain_id": CHAIN_DEVNET,
     });
-    let err = submit_tx(&app, &tx).err().expect("must reject cross-chain");
+    let err = submit_tx(&app, &tx).expect_err("must reject cross-chain");
     assert!(
-        err.contains("chain_id mismatch") && err.contains(CHAIN_DEVNET) && err.contains(CHAIN_MAINNET),
+        err.contains("chain_id mismatch")
+            && err.contains(CHAIN_DEVNET)
+            && err.contains(CHAIN_MAINNET),
         "unexpected error: {err}"
     );
 }
@@ -83,7 +85,7 @@ fn missing_chain_id_rejected_by_gated_mock() {
         "params": [],
         "value": 1_000_000_000u64,
     });
-    let err = submit_tx(&app, &tx).err().expect("must reject missing");
+    let err = submit_tx(&app, &tx).expect_err("must reject missing");
     assert!(
         err.contains("chain_id mismatch") && err.contains("missing chain_id"),
         "unexpected error: {err}"
@@ -120,8 +122,11 @@ fn chain_id_gate_precedes_handler_dispatch() {
         "from": OWNER,
         "chain_id": CHAIN_DEVNET,
     });
-    let err = submit_tx(&app, &tx).err().expect("must reject");
-    assert!(err.contains("chain_id mismatch"), "gate must run first: {err}");
+    let err = submit_tx(&app, &tx).expect_err("must reject");
+    assert!(
+        err.contains("chain_id mismatch"),
+        "gate must run first: {err}"
+    );
     // Anti-leak check: the handler-dispatch error string must NOT
     // appear in the response (otherwise the gate wasn't first).
     assert!(!err.contains("missing method or op_type"), "leak: {err}");
