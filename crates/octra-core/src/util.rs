@@ -32,8 +32,7 @@ pub const WALLET_PASSPHRASE_ENV: &str = "OCTRAVPN_WALLET_PASSPHRASE";
 pub fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Decode a hex string into a fixed-size byte array. The input must be
