@@ -24,6 +24,7 @@ fn make_app() -> AppState {
             ..Default::default()
         })),
         program_addr: PROGRAM_ADDR.to_string(),
+        expected_chain_id: None,
     }
 }
 

@@ -87,6 +87,7 @@ impl ForgeCtx {
                 ..Default::default()
             })),
             program_addr: program_addr.into(),
+            expected_chain_id: None,
         };
         Self {
             program_addr: app.program_addr.clone(),

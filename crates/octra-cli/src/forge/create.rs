@@ -143,6 +143,10 @@ pub fn run(args: &CreateArgs) -> Result<()> {
         ou: args.ou.unwrap_or(DEFAULT_DEPLOY_OU),
         timestamp: current_timestamp(),
         op_type: OP_DEPLOY.to_string(),
+        // v1 envelope — `forge create` produces wallet-compat bytecode
+        // deploys that match the webcli encoding byte-for-byte. Chain-id
+        // binding (v2) is opt-in via `cast send --chain-id`.
+        chain_id: None,
         encrypted_data: Some(bytecode.to_string()),
         message,
     };
