@@ -231,6 +231,18 @@ pub struct TxRow {
 pub struct AppState {
     pub state: Arc<RwLock<ChainState>>,
     pub program_addr: String,
+    /// Optional expected `chain_id` (v2 tx-envelope binding). When
+    /// `Some`, every `octra_submit` checks the tx's `chain_id` field
+    /// matches; mismatches are rejected with the JSON-RPC error
+    /// `"chain_id mismatch: …"`. When `None`, the mock accepts
+    /// both v1 (no `chain_id`) and v2 envelopes regardless of their
+    /// `chain_id` value — that's the legacy default so existing test
+    /// harnesses don't need to know about the field.
+    ///
+    /// The v2 binding lets adversarial tests demonstrate the
+    /// `chain_id_binding_rejects_replay` Lean theorem at the
+    /// tx-envelope layer (P1-5b).
+    pub expected_chain_id: Option<String>,
 }
 
 impl AppState {
@@ -270,6 +282,15 @@ impl AppState {
     ) {
         let key = (circle_id.into(), path.into());
         self.state.write().circle_assets.insert(key, bytes.into());
+    }
+
+    /// Enable v2 tx-envelope chain_id enforcement. Once set, every
+    /// `octra_submit` whose tx `chain_id` doesn't match `id` is
+    /// rejected with a JSON-RPC error. Used by adversarial harnesses
+    /// that pin the Lean
+    /// `chain_id_binding_rejects_replay` claim.
+    pub fn set_expected_chain_id(&mut self, id: impl Into<String>) {
+        self.expected_chain_id = Some(id.into());
     }
 }
 
@@ -682,6 +703,35 @@ fn synthesize_deploy_address(from: &str, bytecode: &str, nonce: u64) -> String {
 fn octra_submit(app: &AppState, params: &Value) -> Result<Value, String> {
     let arr = params.as_array().ok_or("params not array")?;
     let tx = arr.first().ok_or("tx missing")?;
+    // v2 tx-envelope chain_id binding (P1-5b). When the mock is
+    // configured with an `expected_chain_id`, reject every tx whose
+    // `chain_id` doesn't match — both missing-field (v1 tx submitted
+    // to a v2-gated chain) and mismatch (cross-chain replay).
+    //
+    // This mirrors the Lean axiom
+    // `chain_id_binding_rejects_replay`: a tx signed for one chain
+    // cannot be accepted by another, because the chain checks the
+    // envelope's `chain_id` against its own.
+    if let Some(expected) = app.expected_chain_id.as_deref() {
+        let tx_chain_id = tx.get("chain_id").and_then(|v| v.as_str());
+        match tx_chain_id {
+            None => {
+                coverage::record("octra_submit", "chain_id_missing_rejected");
+                return Err(format!(
+                    "chain_id mismatch: tx missing chain_id, expected {expected}"
+                ));
+            }
+            Some(got) if got != expected => {
+                coverage::record("octra_submit", "chain_id_mismatch_rejected");
+                return Err(format!(
+                    "chain_id mismatch: tx chain_id={got}, expected {expected}"
+                ));
+            }
+            Some(_) => {
+                coverage::record("octra_submit", "chain_id_accepted");
+            }
+        }
+    }
     let (working, method, op_type) = normalize_submission(tx)?;
     let tx = &working;
     let from = tx
@@ -2847,12 +2897,25 @@ pub fn read_call(app: &AppState, method: &str, params: &[Value]) -> Result<Value
 }
 
 pub async fn serve(addr: SocketAddr, program_addr: String) -> anyhow::Result<()> {
+    serve_with_chain_id(addr, program_addr, None).await
+}
+
+/// Variant of [`serve`] that pins a v2 chain-id binding (P1-5b). Every
+/// incoming `octra_submit` whose `chain_id` doesn't match `chain_id`
+/// is rejected. Used by adversarial harnesses for the
+/// `chain_id_binding_rejects_replay` Lean theorem.
+pub async fn serve_with_chain_id(
+    addr: SocketAddr,
+    program_addr: String,
+    chain_id: Option<String>,
+) -> anyhow::Result<()> {
     let app = AppState {
         state: Arc::new(RwLock::new(ChainState {
             epoch: 1,
             ..Default::default()
         })),
         program_addr,
+        expected_chain_id: chain_id,
     };
     let router = build_router(app);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -2874,6 +2937,7 @@ mod tests {
                 ..Default::default()
             })),
             program_addr: "octPROGRAM".to_string(),
+            expected_chain_id: None,
         }
     }
 

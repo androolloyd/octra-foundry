@@ -36,6 +36,7 @@ pub fn in_process(program_addr: impl Into<String>) -> Endpoint {
             ..Default::default()
         })),
         program_addr: program_addr.into(),
+        expected_chain_id: None,
     };
     Endpoint::InProcess(app)
 }

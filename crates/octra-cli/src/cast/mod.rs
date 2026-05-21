@@ -54,6 +54,13 @@ pub enum CastCmd {
         key: Option<std::path::PathBuf>,
         #[arg(long, env = "OCTRA_RPC_URL", default_value = DEFAULT_RPC_URL)]
         rpc_url: String,
+        /// v2 chain-id binding (P1-5b). When set, the tx envelope's
+        /// canonical bytes include `chain_id`, binding the signature
+        /// to a specific network. Omit (or leave empty) for v1
+        /// (wallet-compat) signing. Mainnet operators should pass
+        /// `octra-mainnet`; devnet, `octra-devnet`.
+        #[arg(long, env = "OCTRA_CHAIN_ID")]
+        chain_id: Option<String>,
     },
     /// Fetch a tx by hash.
     Tx {
@@ -101,6 +108,9 @@ pub enum CastCmd {
         /// Optional message attached to the tx.
         #[arg(long)]
         message: Option<String>,
+        /// v2 chain-id binding (P1-5b). See `Send::chain_id`.
+        #[arg(long, env = "OCTRA_CHAIN_ID")]
+        chain_id: Option<String>,
     },
     /// Raw JSON-RPC pass-through.
     Rpc {
@@ -142,6 +152,7 @@ pub fn dispatch(cmd: CastCmd) -> Result<()> {
             from,
             key,
             rpc_url,
+            chain_id,
         } => cast_send(
             &addr,
             &method,
@@ -152,6 +163,7 @@ pub fn dispatch(cmd: CastCmd) -> Result<()> {
             from.as_deref(),
             key.as_deref(),
             &rpc_url,
+            chain_id.as_deref(),
         ),
         CastCmd::Tx { hash, rpc_url } => tx::print_tx(&hash, &rpc_url),
         CastCmd::Block { epoch, rpc_url } => tx::print_block(epoch, &rpc_url),
@@ -170,7 +182,17 @@ pub fn dispatch(cmd: CastCmd) -> Result<()> {
             key,
             rpc_url,
             message,
-        } => cast_transfer(&to, amount, ou, nonce, &key, &rpc_url, message.as_deref()),
+            chain_id,
+        } => cast_transfer(
+            &to,
+            amount,
+            ou,
+            nonce,
+            &key,
+            &rpc_url,
+            message.as_deref(),
+            chain_id.as_deref(),
+        ),
         CastCmd::Rpc {
             method,
             args,
@@ -190,6 +212,7 @@ fn cast_transfer(
     key: &std::path::Path,
     rpc_url: &str,
     message: Option<&str>,
+    chain_id: Option<&str>,
 ) -> Result<()> {
     let bytes = cio::read_secret_hex(key)?;
     let kp = octra_core::sig::KeyPair::from_secret_bytes(&bytes);
@@ -220,6 +243,15 @@ fn cast_transfer(
         tx.as_object_mut()
             .unwrap()
             .insert("message".into(), json!(m));
+    }
+    // v2 chain-id binding (P1-5b). Adding the field promotes the
+    // envelope to v2 — the signed canonical bytes include `chain_id`
+    // so the chain checker can reject cross-chain replays. Default
+    // (no flag) keeps the v1 wallet-compat encoding.
+    if let Some(cid) = chain_id.filter(|s| !s.is_empty()) {
+        tx.as_object_mut()
+            .unwrap()
+            .insert("chain_id".into(), json!(cid));
     }
     let signed = octra_core::tx::sign_call(&kp, tx).map_err(|e| anyhow!("sign_call: {e}"))?;
     let result = rpc_client::call(&endpoint, "octra_submit", json!([signed]))?;
@@ -257,6 +289,7 @@ fn cast_send(
     from: Option<&str>,
     key: Option<&std::path::Path>,
     rpc_url: &str,
+    chain_id: Option<&str>,
 ) -> Result<()> {
     let parsed: Vec<Value> = args.iter().map(|a| cio::parse_arg_token(a)).collect();
     let endpoint = rpc_client::endpoint_from_url(rpc_url);
@@ -282,8 +315,17 @@ fn cast_send(
             }
         }
     };
-    let (from_str, signed) =
-        build_envelope(addr, method, &parsed, value, fee, resolved_nonce, from, key)?;
+    let (from_str, signed) = build_envelope(
+        addr,
+        method,
+        &parsed,
+        value,
+        fee,
+        resolved_nonce,
+        from,
+        key,
+        chain_id,
+    )?;
     let result = rpc_client::call(&endpoint, "octra_submit", json!([signed]))?;
     println!("submitted from: {from_str}");
     cio::dump_json(&result);
@@ -300,6 +342,7 @@ fn build_envelope(
     nonce: u64,
     from: Option<&str>,
     key: Option<&std::path::Path>,
+    chain_id: Option<&str>,
 ) -> Result<(String, Value)> {
     let mut call = json!({
         "kind": "contract_call",
@@ -312,6 +355,11 @@ fn build_envelope(
         "nonce": nonce,
         "timestamp": cio::current_timestamp(),
     });
+    if let Some(cid) = chain_id.filter(|s| !s.is_empty()) {
+        call.as_object_mut()
+            .unwrap()
+            .insert("chain_id".into(), json!(cid));
+    }
     if let Some(p) = key {
         let bytes = cio::read_secret_hex(p)?;
         let kp = octra_core::sig::KeyPair::from_secret_bytes(&bytes);
