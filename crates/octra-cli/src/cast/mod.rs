@@ -197,7 +197,9 @@ fn cast_transfer(
         .display()
         .to_string();
     let endpoint = rpc_client::endpoint_from_url(rpc_url);
-    let actual_nonce = if let Some(n) = nonce { n } else {
+    let actual_nonce = if let Some(n) = nonce {
+        n
+    } else {
         let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
             .context("fetch balance for nonce")?;
         bal.get("nonce")
@@ -215,7 +217,9 @@ fn cast_transfer(
         "op_type": "standard",
     });
     if let Some(m) = message {
-        tx.as_object_mut().unwrap().insert("message".into(), json!(m));
+        tx.as_object_mut()
+            .unwrap()
+            .insert("message".into(), json!(m));
     }
     let signed = octra_core::tx::sign_call(&kp, tx).map_err(|e| anyhow!("sign_call: {e}"))?;
     let result = rpc_client::call(&endpoint, "octra_submit", json!([signed]))?;
@@ -278,16 +282,8 @@ fn cast_send(
             }
         }
     };
-    let (from_str, signed) = build_envelope(
-        addr,
-        method,
-        &parsed,
-        value,
-        fee,
-        resolved_nonce,
-        from,
-        key,
-    )?;
+    let (from_str, signed) =
+        build_envelope(addr, method, &parsed, value, fee, resolved_nonce, from, key)?;
     let result = rpc_client::call(&endpoint, "octra_submit", json!([signed]))?;
     println!("submitted from: {from_str}");
     cio::dump_json(&result);

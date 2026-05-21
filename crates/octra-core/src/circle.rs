@@ -141,11 +141,7 @@ pub fn canonical_payload_json(payload: &CircleDeployPayload) -> String {
 /// Predict the circle id from `(deployer, nonce, payload)`. Match
 /// the reference JS `circleIdOfDeploy` byte-for-byte: returns an
 /// `oct…` string padded/cycled to 47 chars total ("oct" + 44 base58).
-pub fn circle_id_of_deploy(
-    deployer: &str,
-    nonce: u64,
-    payload: &CircleDeployPayload,
-) -> String {
+pub fn circle_id_of_deploy(deployer: &str, nonce: u64, payload: &CircleDeployPayload) -> String {
     let payload_json = canonical_payload_json(payload);
     let payload_hash_hex = h256_hex("octra:circle_deploy_payload:v1", &[payload_json.as_bytes()]);
     let seed = h256_raw(
@@ -267,7 +263,12 @@ pub fn derive_sealed_read_key(
 ) -> Zeroizing<[u8; 32]> {
     let salt = format!("octra:circle:sealed_read:v1:{circle_id}:{key_id}");
     let mut key = Zeroizing::new([0u8; 32]);
-    pbkdf2_hmac::<sha2::Sha256>(passphrase.as_bytes(), salt.as_bytes(), PBKDF2_ITERS, &mut *key);
+    pbkdf2_hmac::<sha2::Sha256>(
+        passphrase.as_bytes(),
+        salt.as_bytes(),
+        PBKDF2_ITERS,
+        &mut *key,
+    );
     key
 }
 
@@ -340,8 +341,7 @@ pub fn decrypt_sealed_bytes(
     if frame.len() < 4 {
         return Err(anyhow!("frame too short"));
     }
-    let plain_len =
-        u32::from_be_bytes(frame[..4].try_into().expect("4-byte prefix")) as usize;
+    let plain_len = u32::from_be_bytes(frame[..4].try_into().expect("4-byte prefix")) as usize;
     if plain_len > frame.len() - 4 {
         return Err(anyhow!("frame length prefix exceeds payload"));
     }
@@ -421,13 +421,19 @@ mod tests {
     fn sealed_envelope_roundtrips() {
         let plaintext = b"hello operator policy";
         let (ct_b64, ph_hex) = encrypt_sealed_bytes(
-            "octABC", "default", "correct horse battery staple",
-            plaintext, PaddingClass::None,
+            "octABC",
+            "default",
+            "correct horse battery staple",
+            plaintext,
+            PaddingClass::None,
         )
         .expect("encrypt");
         let recovered = decrypt_sealed_bytes(
-            "octABC", "default", "correct horse battery staple",
-            &ct_b64, &ph_hex,
+            "octABC",
+            "default",
+            "correct horse battery staple",
+            &ct_b64,
+            &ph_hex,
         )
         .expect("decrypt");
         assert_eq!(recovered, plaintext);
@@ -435,10 +441,8 @@ mod tests {
 
     #[test]
     fn sealed_envelope_wrong_passphrase_fails() {
-        let (ct, ph) = encrypt_sealed_bytes(
-            "octABC", "k1", "right", b"secret", PaddingClass::K4,
-        )
-        .unwrap();
+        let (ct, ph) =
+            encrypt_sealed_bytes("octABC", "k1", "right", b"secret", PaddingClass::K4).unwrap();
         assert!(decrypt_sealed_bytes("octABC", "k1", "wrong", &ct, &ph).is_err());
     }
 

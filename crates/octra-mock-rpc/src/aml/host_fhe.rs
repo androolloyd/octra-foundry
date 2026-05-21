@@ -262,7 +262,10 @@ fn check_header(b: &[u8], want_tag: u8) -> Result<(), FheError> {
         )));
     }
     if b[5] != want_tag {
-        return Err(err(format!("wrong type tag {:#x} (want {want_tag:#x})", b[5])));
+        return Err(err(format!(
+            "wrong type tag {:#x} (want {want_tag:#x})",
+            b[5]
+        )));
     }
     Ok(())
 }
@@ -587,7 +590,11 @@ mod tests {
         let pk2 = keygen_for_addr("octL");
         let a = encrypt_const(&pk1, 1);
         let err = fhe_add_const(&pk2, &a, 1).unwrap_err();
-        assert!(err.0.contains("pubkey/ciphertext mismatch"), "got: {}", err.0);
+        assert!(
+            err.0.contains("pubkey/ciphertext mismatch"),
+            "got: {}",
+            err.0
+        );
     }
 
     #[test]
@@ -623,7 +630,11 @@ mod tests {
         let z = encrypt_const(&pk1, 0);
         let proof = make_zero_proof(&pk1, &z);
         let err = fhe_verify_zero(&pk2, &z, &proof).unwrap_err();
-        assert!(err.0.contains("pubkey/ciphertext mismatch"), "got: {}", err.0);
+        assert!(
+            err.0.contains("pubkey/ciphertext mismatch"),
+            "got: {}",
+            err.0
+        );
     }
 
     #[test]
@@ -711,10 +722,7 @@ mod tests {
         // Same setup, but the operator tries to claim more than they
         // earned. delta != 0, so verify_zero must say false.
         let pk = keygen_for_addr("octProxy2");
-        let balance = fhe_add(
-            &encrypt_const(&pk, 5),
-            &encrypt_const(&pk, 3),
-        ).unwrap();
+        let balance = fhe_add(&encrypt_const(&pk, 5), &encrypt_const(&pk, 3)).unwrap();
         let bogus_claim: u64 = 100;
         let neg = (!bogus_claim).wrapping_add(1);
         let delta = fhe_add_const(&pk, &balance, neg).unwrap();

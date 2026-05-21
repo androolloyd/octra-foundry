@@ -52,10 +52,7 @@ pub enum CoreError {
     /// `suggested_cmd` so the operator has a one-line copy-paste to fix.
     /// Threat-model ref: docs/v2-threat-model.md P1-6.
     #[error("plaintext key on disk at {path}; re-seal via: {suggested_cmd}")]
-    PlaintextKeyOnDisk {
-        path: String,
-        suggested_cmd: String,
-    },
+    PlaintextKeyOnDisk { path: String, suggested_cmd: String },
 }
 
 pub type CoreResult<T> = std::result::Result<T, CoreError>;

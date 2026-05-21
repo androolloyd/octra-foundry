@@ -58,11 +58,7 @@ fn print_only_does_not_dial_network() {
     let pvac_pk = STANDARD.encode([0x42u8; 32]);
 
     let out = cmd()
-        .args([
-            "cast",
-            "register-pvac",
-            "--key",
-        ])
+        .args(["cast", "register-pvac", "--key"])
         .arg(&key_path)
         .args([
             "--pvac-pk",

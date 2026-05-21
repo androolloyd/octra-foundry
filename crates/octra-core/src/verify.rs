@@ -75,10 +75,7 @@ mod kani_harnesses {
         let mut joined = Vec::with_capacity(4);
         joined.extend_from_slice(&l);
         joined.extend_from_slice(&r);
-        assert_ne!(
-            h256_raw(t, &[&l, &r]),
-            h256_raw(t, &[&joined]),
-        );
+        assert_ne!(h256_raw(t, &[&l, &r]), h256_raw(t, &[&joined]),);
     }
 
     /// circle_id_of_deploy is deterministic.

@@ -488,8 +488,7 @@ fn octra_fhe_encrypt(app: &AppState, params: &Value) -> Result<Value, String> {
         .and_then(Value::as_u64)
         .ok_or("value (u64) missing")?;
     let s = app.state.read();
-    let pk =
-        aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
+    let pk = aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
     let ct = aml::host_fhe::encrypt_const(&pk, value);
     Ok(json!({ "ct_b64": B64.encode(ct.as_bytes()) }))
 }
@@ -517,8 +516,7 @@ fn octra_fhe_add_const(app: &AppState, params: &Value) -> Result<Value, String> 
         .and_then(Value::as_u64)
         .ok_or("const (u64) missing")?;
     let s = app.state.read();
-    let pk =
-        aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
+    let pk = aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
     let ct = aml::host_fhe::fhe_deser(&ct_b).map_err(|e| e.to_string())?;
     let r = aml::host_fhe::fhe_add_const(&pk, &ct, k).map_err(|e| e.to_string())?;
     Ok(json!({ "ct_b64": B64.encode(r.as_bytes()) }))
@@ -530,8 +528,7 @@ fn octra_fhe_verify_zero(app: &AppState, params: &Value) -> Result<Value, String
     let ct_b = b64_decode(arr.get(1).and_then(Value::as_str).ok_or("ct missing")?)?;
     let pf_b = b64_decode(arr.get(2).and_then(Value::as_str).ok_or("proof missing")?)?;
     let s = app.state.read();
-    let pk =
-        aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
+    let pk = aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
     let ct = aml::host_fhe::fhe_deser(&ct_b).map_err(|e| e.to_string())?;
     let proof = aml::host_fhe::ZeroProof::from_bytes(&pf_b).map_err(|e| e.to_string())?;
     let ok = aml::host_fhe::fhe_verify_zero(&pk, &ct, &proof).map_err(|e| e.to_string())?;
@@ -543,8 +540,7 @@ fn octra_fhe_decrypt(app: &AppState, params: &Value) -> Result<Value, String> {
     let addr = arr.first().and_then(Value::as_str).ok_or("addr missing")?;
     let ct_b = b64_decode(arr.get(1).and_then(Value::as_str).ok_or("ct missing")?)?;
     let s = app.state.read();
-    let pk =
-        aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
+    let pk = aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
     let ct = aml::host_fhe::fhe_deser(&ct_b).map_err(|e| e.to_string())?;
     let v = aml::host_fhe::decrypt(&pk, &ct);
     Ok(json!({ "value": v }))
@@ -555,8 +551,7 @@ fn octra_fhe_make_zero_proof(app: &AppState, params: &Value) -> Result<Value, St
     let addr = arr.first().and_then(Value::as_str).ok_or("addr missing")?;
     let ct_b = b64_decode(arr.get(1).and_then(Value::as_str).ok_or("ct missing")?)?;
     let s = app.state.read();
-    let pk =
-        aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
+    let pk = aml::host_fhe::fhe_load_pk(&s.pvac_pubkeys, addr).map_err(|e| e.to_string())?;
     let ct = aml::host_fhe::fhe_deser(&ct_b).map_err(|e| e.to_string())?;
     let proof = aml::host_fhe::make_zero_proof(&pk, &ct);
     Ok(json!({ "proof_b64": B64.encode(proof.as_bytes()) }))
@@ -2322,13 +2317,11 @@ fn apply_claim_earnings_v2(app: &AppState, tx: &Value, from: &str) -> Result<Vec
             .ok_or("pubkey not registered")?;
         let bal_ct = aml::host_fhe::encrypt_const(&pk, balance);
         let neg_claim = (!claimed).wrapping_add(1);
-        let delta = aml::host_fhe::fhe_add_const(&pk, &bal_ct, neg_claim)
-            .map_err(|e| e.to_string())?;
+        let delta =
+            aml::host_fhe::fhe_add_const(&pk, &bal_ct, neg_claim).map_err(|e| e.to_string())?;
         let pf_bytes = B64.decode(&proof).map_err(|e| format!("proof b64: {e}"))?;
-        let zp = aml::host_fhe::ZeroProof::from_bytes(&pf_bytes)
-            .map_err(|e| e.to_string())?;
-        let ok = aml::host_fhe::fhe_verify_zero(&pk, &delta, &zp)
-            .map_err(|e| e.to_string())?;
+        let zp = aml::host_fhe::ZeroProof::from_bytes(&pf_bytes).map_err(|e| e.to_string())?;
+        let ok = aml::host_fhe::fhe_verify_zero(&pk, &delta, &zp).map_err(|e| e.to_string())?;
         if !ok {
             return Err("bad opening".into());
         }

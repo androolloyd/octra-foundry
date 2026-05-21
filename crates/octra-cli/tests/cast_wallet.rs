@@ -73,11 +73,11 @@ fn wallet_sign_returns_base64() {
 /// secret to stderr by default.
 #[test]
 fn wallet_new_default_refuses_to_print_secret() {
-    let out = cmd()
-        .args(["cast", "wallet", "new"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "should refuse without --out/--show-secret");
+    let out = cmd().args(["cast", "wallet", "new"]).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "should refuse without --out/--show-secret"
+    );
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(
         err.contains("refusing to emit secret material"),

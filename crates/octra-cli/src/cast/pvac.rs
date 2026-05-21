@@ -226,7 +226,11 @@ pub fn dispatch(args: &RegisterPvacArgs) -> Result<()> {
                 .with_context(|| format!("read --pvac-pk-file {}", p.display()))?;
             body.trim().to_string()
         }
-        (Some(_), Some(_)) => return Err(anyhow!("--pvac-pk and --pvac-pk-file are mutually exclusive")),
+        (Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "--pvac-pk and --pvac-pk-file are mutually exclusive"
+            ))
+        }
         (None, None) => return Err(anyhow!("one of --pvac-pk or --pvac-pk-file is required")),
     };
     // The sidecar emits "hfhe_v1|<base64>". Accept both shapes —
@@ -236,11 +240,7 @@ pub fn dispatch(args: &RegisterPvacArgs) -> Result<()> {
         .strip_prefix("hfhe_v1|")
         .unwrap_or(&raw_pubkey)
         .to_string();
-    let signed = build_signed_registration(
-        &args.key,
-        &pubkey_b64,
-        args.kat_hex.as_deref(),
-    )?;
+    let signed = build_signed_registration(&args.key, &pubkey_b64, args.kat_hex.as_deref())?;
 
     if args.print_only {
         cio::dump_json(&signed.to_debug_json());

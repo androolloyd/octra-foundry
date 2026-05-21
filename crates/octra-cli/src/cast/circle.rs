@@ -16,7 +16,7 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
 use octra_core::circle::{
-    canonical_payload_json, circle_id_of_deploy, default_deploy_payload, decrypt_sealed_bytes,
+    canonical_payload_json, circle_id_of_deploy, decrypt_sealed_bytes, default_deploy_payload,
     encrypt_sealed_bytes, resource_key, CircleDeployPayload, PaddingClass,
 };
 use serde_json::{json, Value};
@@ -226,7 +226,9 @@ fn deploy(args: &DeployArgs) -> Result<()> {
         .to_string();
     let endpoint = rpc_client::endpoint_from_url(&args.rpc_url);
 
-    let resolved_nonce = if let Some(n) = args.nonce { n } else {
+    let resolved_nonce = if let Some(n) = args.nonce {
+        n
+    } else {
         let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
             .context("fetch balance for nonce")?;
         bal.get("nonce").and_then(Value::as_u64).unwrap_or(0) + 1
@@ -297,8 +299,8 @@ fn parse_padding(s: &str) -> Result<PaddingClass> {
 }
 
 fn put_encrypted(args: &PutEncryptedArgs) -> Result<()> {
-    let plaintext = std::fs::read(&args.file)
-        .with_context(|| format!("read {}", args.file.display()))?;
+    let plaintext =
+        std::fs::read(&args.file).with_context(|| format!("read {}", args.file.display()))?;
     let padding = parse_padding(&args.padding_class)?;
     let (ciphertext_b64, plaintext_hash) = encrypt_sealed_bytes(
         &args.circle_id,
@@ -315,7 +317,9 @@ fn put_encrypted(args: &PutEncryptedArgs) -> Result<()> {
         .to_string();
     let endpoint = rpc_client::endpoint_from_url(&args.rpc_url);
 
-    let resolved_nonce = if let Some(n) = args.nonce { n } else {
+    let resolved_nonce = if let Some(n) = args.nonce {
+        n
+    } else {
         let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
             .context("fetch balance for nonce")?;
         bal.get("nonce").and_then(Value::as_u64).unwrap_or(0) + 1
@@ -369,8 +373,8 @@ fn put_encrypted(args: &PutEncryptedArgs) -> Result<()> {
 }
 
 fn encrypt_only(args: &EncryptOnlyArgs) -> Result<()> {
-    let plaintext = std::fs::read(&args.file)
-        .with_context(|| format!("read {}", args.file.display()))?;
+    let plaintext =
+        std::fs::read(&args.file).with_context(|| format!("read {}", args.file.display()))?;
     let padding = parse_padding(&args.padding_class)?;
     let (ciphertext_b64, plaintext_hash) = encrypt_sealed_bytes(
         &args.circle_id,
@@ -406,7 +410,10 @@ fn get_encrypted(args: &GetEncryptedArgs) -> Result<()> {
         .get("plaintext_hash")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("response missing plaintext_hash: {v}"))?;
-    let key_id_on_chain = v.get("key_id").and_then(Value::as_str).unwrap_or(&args.key_id);
+    let key_id_on_chain = v
+        .get("key_id")
+        .and_then(Value::as_str)
+        .unwrap_or(&args.key_id);
 
     let plaintext = decrypt_sealed_bytes(
         &args.circle_id,
@@ -417,8 +424,7 @@ fn get_encrypted(args: &GetEncryptedArgs) -> Result<()> {
     )?;
 
     if let Some(out) = &args.out {
-        std::fs::write(out, &plaintext)
-            .with_context(|| format!("write {}", out.display()))?;
+        std::fs::write(out, &plaintext).with_context(|| format!("write {}", out.display()))?;
         eprintln!("wrote {} bytes -> {}", plaintext.len(), out.display());
     } else {
         let s = std::str::from_utf8(&plaintext)
