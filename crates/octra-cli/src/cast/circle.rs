@@ -12,6 +12,24 @@
 //!   * `asset`    — `circle_asset` RPC (plaintext asset by path).
 //!   * `asset-key` — `circle_asset_ciphertext_by_resource_key` RPC
 //!                   (path-private encrypted asset).
+//!   * `put`      — publish a plaintext asset under a path via
+//!                  `op_type = "circle_asset_put"` (mirrors the
+//!                  encrypted variant minus the AES-GCM step).
+//!
+//! ## Forward-compatibility note for `put`
+//!
+//! As of 2026-05 the live chain enforces `resource_mode = sealed_read`
+//! on every circle it accepts: a wire-correct plaintext `put` is parsed
+//! and dispatched but rejected at apply-time with
+//! `circle_mode_invalid: sealed_read circles require encrypted asset
+//! updates`. The subcommand is therefore **forward-compatible**: it
+//! works against `octra-mock-rpc` today (the mock accepts the envelope
+//! and records the tx without enforcing the mode) and will work against
+//! devnet/mainnet the day the chain enables a non-sealed
+//! `resource_mode` (e.g. `public_read`). The wire shape mirrors
+//! `circle_asset_put_encrypted` exactly minus the AES-GCM step, so no
+//! client changes are required when that lands. Tests in
+//! `tests/cast_circle_put.rs` lock the wire-shape parity in.
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
@@ -37,6 +55,8 @@ pub enum CircleCmd {
     AssetKey(AssetKeyArgs),
     /// Compute the resource_key for `(circle_id, canonical_path)`.
     Key(KeyArgs),
+    /// Upload a plaintext asset to a circle (PUT-style).
+    Put(PutArgs),
     /// Encrypt + upload a sealed asset to a circle (PUT-style).
     PutEncrypted(PutEncryptedArgs),
     /// Encrypt-only (no upload) — prints the envelope you'd submit.
@@ -106,6 +126,36 @@ pub struct AssetKeyArgs {
 pub struct KeyArgs {
     pub circle_id: String,
     pub canonical_path: String,
+}
+
+#[derive(Args, Debug)]
+pub struct PutArgs {
+    /// Circle to upload into.
+    #[arg(long)]
+    pub circle: String,
+    /// Canonical path inside the circle (e.g. `/index.html`).
+    #[arg(long)]
+    pub path: String,
+    /// Source file (plaintext bytes).
+    #[arg(long)]
+    pub file: std::path::PathBuf,
+    /// Content type to register with the asset.
+    #[arg(long, default_value = "application/octet-stream")]
+    pub content_type: String,
+    /// Optional plain "encoding" hint stored alongside the asset.
+    #[arg(long)]
+    pub encoding: Option<String>,
+    /// Wallet key file for signing the tx.
+    #[arg(long, env = "OCTRA_KEY_FILE")]
+    pub key: std::path::PathBuf,
+    /// OU fee (mirrors webcli's default for put-encrypted: 5000).
+    #[arg(long, default_value_t = 5_000u64)]
+    pub ou: u64,
+    /// Explicit nonce; auto-fetched if omitted.
+    #[arg(long)]
+    pub nonce: Option<u64>,
+    #[arg(long, env = "OCTRA_RPC_URL", default_value = super::DEFAULT_RPC_URL)]
+    pub rpc_url: String,
 }
 
 #[derive(Args, Debug)]
@@ -187,6 +237,7 @@ pub fn dispatch(cmd: CircleCmd) -> Result<()> {
             println!("{}", resource_key(&a.circle_id, &a.canonical_path));
             Ok(())
         }
+        CircleCmd::Put(a) => put_plaintext(&a),
         CircleCmd::PutEncrypted(a) => put_encrypted(&a),
         CircleCmd::EncryptOnly(a) => encrypt_only(&a),
         CircleCmd::GetEncrypted(a) => get_encrypted(&a),
@@ -296,6 +347,80 @@ fn asset_key(args: &AssetKeyArgs) -> Result<()> {
 fn parse_padding(s: &str) -> Result<PaddingClass> {
     PaddingClass::from_str_opt(s)
         .ok_or_else(|| anyhow!("unknown padding class: {s} (expected: none, 4k, 16k, 32k, 128k)"))
+}
+
+/// Publish a plaintext asset. Wire shape mirrors
+/// `circle_asset_put_encrypted`:
+///   * `op_type     = "circle_asset_put"` (canonical plaintext variant)
+///   * `to_         = circle_id`
+///   * `encrypted_data = base64(file_bytes)` — same byte-carrier slot
+///     the encrypted variant uses; the chain dispatches on `op_type`
+///     so the field name is purely cosmetic here.
+///   * `message     = JSON { path, content_type, plaintext_hash, encoding? }`
+///
+/// The chain enforces the same `(circle_id, path)` ownership +
+/// `max_assets_bytes` quota the encrypted variant does. Plaintext
+/// assets are readable via `circle_asset(circle_id, path)`.
+fn put_plaintext(args: &PutArgs) -> Result<()> {
+    let plaintext =
+        std::fs::read(&args.file).with_context(|| format!("read {}", args.file.display()))?;
+    let plaintext_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &plaintext);
+    let plaintext_hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&plaintext));
+
+    let bytes = cio::read_secret_hex(&args.key)?;
+    let kp = octra_core::sig::KeyPair::from_secret_bytes(&bytes);
+    let from = octra_core::address::Address::from_pubkey(&kp.public.0)
+        .display()
+        .to_string();
+    let endpoint = rpc_client::endpoint_from_url(&args.rpc_url);
+
+    let resolved_nonce = if let Some(n) = args.nonce {
+        n
+    } else {
+        let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
+            .context("fetch balance for nonce")?;
+        bal.get("nonce").and_then(Value::as_u64).unwrap_or(0) + 1
+    };
+
+    let mut payload = json!({
+        "path": &args.path,
+        "content_type": &args.content_type,
+        "plaintext_hash": &plaintext_hash,
+    });
+    if let Some(enc) = &args.encoding {
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("encoding".into(), json!(enc));
+    }
+
+    let tx = json!({
+        "from": &from,
+        "to_": &args.circle,
+        "amount": "0",
+        "nonce": resolved_nonce,
+        "ou": args.ou.to_string(),
+        "timestamp": cio::current_timestamp(),
+        "op_type": "circle_asset_put",
+        "encrypted_data": plaintext_b64,
+        "message": payload.to_string(),
+    });
+    let signed = octra_core::tx::sign_call(&kp, tx).map_err(|e| anyhow!("sign_call: {e}"))?;
+    let result = rpc_client::call(&endpoint, "octra_submit", json!([signed]))
+        .context("submit circle_asset_put")?;
+
+    cio::dump_json(&json!({
+        "circle_id": &args.circle,
+        "path": &args.path,
+        "plaintext_hash": plaintext_hash,
+        "plaintext_size": plaintext.len(),
+        "from": from,
+        "nonce": resolved_nonce,
+        "ou": args.ou,
+        "submit": result,
+    }));
+    Ok(())
 }
 
 fn put_encrypted(args: &PutEncryptedArgs) -> Result<()> {
