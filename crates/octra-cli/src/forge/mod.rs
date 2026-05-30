@@ -15,6 +15,7 @@ pub mod inspect;
 pub mod snapshot;
 pub mod test_cmd;
 pub mod trace;
+pub mod verification;
 pub mod verify;
 
 use anyhow::Result;

@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::{io::write_to, rpc_client};
 
-use super::compile;
+use super::{compile, verification};
 
 #[derive(Args, Debug)]
 pub struct BuildArgs {
@@ -43,25 +43,29 @@ pub fn run(args: &BuildArgs) -> Result<()> {
         compile_offline(&multi_in)
     } else {
         let endpoint = rpc_client::endpoint_from_url(args.rpc_url.as_deref().unwrap_or(""));
-        rpc_client::call(
-            &endpoint,
-            "octra_compileAmlMulti",
-            json!([Value::Object(multi_in.clone())]),
-        )
-        .or_else(|e| {
+        compile_rpc(&endpoint, &files).unwrap_or_else(|e| {
             tracing::warn!("rpc compile failed ({e}); falling back to offline stub");
-            Ok::<Value, anyhow::Error>(compile_offline(&multi_in))
-        })?
+            compile_offline(&multi_in)
+        })
     };
     let map = compiled
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("compile result not an object"))?;
     let mut produced = Vec::new();
+    let mut all_ok = true;
     for (path, artifact) in map {
         let name = artifact["name"]
             .as_str()
             .map_or_else(|| path.clone(), str::to_string);
         write_artifact(&args.out, &name, artifact)?;
+        // Surface the compiler's diagnostics + (upcoming) formal-
+        // verification audit straight from the compile response. Against
+        // the live compiler today this is just the version/size line;
+        // when the FV release lands, per-function proofs + problems
+        // appear here with no pipeline change. The `octrascan`-bound
+        // payload is the same `parse_compile` structure.
+        let report = verification::parse_compile(&name, artifact);
+        all_ok &= verification::render_compile(&report);
         produced.push(name);
     }
     println!(
@@ -70,7 +74,33 @@ pub fn run(args: &BuildArgs) -> Result<()> {
         args.out.display(),
         produced.join(",")
     );
+    if !all_ok {
+        return Err(anyhow::anyhow!(
+            "formal verification reported failures (see above)"
+        ));
+    }
     Ok(())
+}
+
+/// Compile each discovered contract through the **live** compiler
+/// (`octra_compileAml`), keyed by the verifier's `program_name`. Each
+/// artifact carries the `aml_safety_report_v1` `verification` audit + the
+/// `certificate`. Multi-file projects with imports use
+/// `octra_compileAmlMulti` with a `{files:[{path,source}], main}` payload;
+/// this per-file path covers the common single-file case.
+fn compile_rpc(endpoint: &rpc_client::Endpoint, files: &[(String, String)]) -> Result<Value> {
+    let mut out = serde_json::Map::new();
+    for (path, source) in files {
+        let artifact = rpc_client::call(endpoint, "octra_compileAml", json!([source]))
+            .with_context(|| format!("compile {path}"))?;
+        let name = artifact
+            .get("verification")
+            .and_then(|v| v.get("program_name"))
+            .and_then(Value::as_str)
+            .map_or_else(|| compile::infer_program_name(path, source), str::to_string);
+        out.insert(name, artifact);
+    }
+    Ok(Value::Object(out))
 }
 
 fn compile_offline(files: &serde_json::Map<String, Value>) -> Value {
@@ -130,6 +160,7 @@ pub fn write_artifact(out_dir: &Path, name: &str, artifact: &Value) -> Result<()
     write_to(&out_dir.join(format!("{name}.bin")), bin)?;
     let asm = artifact
         .get("assembly")
+        .or_else(|| artifact.get("disasm"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
     write_to(&out_dir.join(format!("{name}.asm")), asm)?;
