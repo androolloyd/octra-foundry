@@ -80,6 +80,38 @@ impl FvFunction {
     }
 }
 
+/// One per-site entry from the verifier's `findings[]` — the richest
+/// actionable signal. Unlike [`FvCheck`] (a property-level rollup) this
+/// pins the exact `function` and `parameter` (or `state_field`) behind a
+/// violation, e.g. `unsigned_parameter_without_positive_guard` →
+/// `set_params(new_protocol_fee_bps)`. This is the list octrascan renders
+/// per contract.
+#[derive(Debug, Clone, Serialize)]
+pub struct FvFinding {
+    pub severity: Severity,
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_field: Option<String>,
+}
+
+impl FvFinding {
+    /// Human-readable location: `fn(param)`, `fn.field`, or just `fn`.
+    #[must_use]
+    pub fn location(&self) -> String {
+        match (&self.function, &self.parameter, &self.state_field) {
+            (Some(f), Some(p), _) => format!("{f}({p})"),
+            (Some(f), None, Some(s)) => format!("{f}.{s}"),
+            (Some(f), None, None) => f.clone(),
+            _ => String::new(),
+        }
+    }
+}
+
 /// The `aml_safety_report_v1` formal-verification audit. This is the
 /// structure octrascan renders; `raw` keeps the full payload
 /// (invariants, proof_model, …).
@@ -96,6 +128,7 @@ pub struct FvAudit {
     pub warnings: u64,
     pub checks: Vec<FvCheck>,
     pub functions: Vec<FvFunction>,
+    pub findings: Vec<FvFinding>,
     pub raw: Value,
 }
 
@@ -178,6 +211,11 @@ fn parse_fv(v: &Value) -> Option<FvAudit> {
         .and_then(Value::as_array)
         .map(|arr| arr.iter().map(parse_function).collect())
         .unwrap_or_default();
+    let findings = fv
+        .get("findings")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().map(parse_finding).collect())
+        .unwrap_or_default();
 
     Some(FvAudit {
         schema: str_field(fv, "schema").unwrap_or_else(|| "unknown".into()),
@@ -189,6 +227,7 @@ fn parse_fv(v: &Value) -> Option<FvAudit> {
         warnings: fv.get("warnings").and_then(Value::as_u64).unwrap_or(0),
         checks,
         functions,
+        findings,
         raw: fv.clone(),
     })
 }
@@ -209,6 +248,20 @@ fn parse_function(f: &Value) -> FvFunction {
         name: str_field(f, "name").unwrap_or_default(),
         signed_params: strs("signed_params"),
         value_writes: strs("value_writes"),
+    }
+}
+
+fn parse_finding(f: &Value) -> FvFinding {
+    FvFinding {
+        severity: f
+            .get("severity")
+            .and_then(Value::as_str)
+            .map_or(Severity::Warning, parse_severity),
+        code: str_field(f, "code").unwrap_or_default(),
+        message: str_field(f, "message").unwrap_or_default(),
+        function: str_field(f, "function_name"),
+        parameter: str_field(f, "parameter"),
+        state_field: str_field(f, "state_field"),
     }
 }
 
@@ -269,37 +322,72 @@ fn render_fv(fv: &FvAudit) -> bool {
             fv.errors, fv.warnings
         );
     }
-    // List the checks that flagged something, errors first.
-    let mut findings: Vec<&FvCheck> = fv.checks.iter().filter(|c| c.is_finding()).collect();
-    findings.sort_by_key(|c| c.severity != Severity::Error);
-    for c in findings {
-        let mark = if c.severity == Severity::Error {
-            "error"
+    // Per-site findings (`findings[]`) are the richest signal — they name
+    // the exact function + parameter/field behind each violation, rendered
+    // `fn(param): message [code]`. When a response omits them, fall back to
+    // the property-level `trace` rollup plus `function_summaries` data-flow
+    // hints to locate the cause.
+    if fv.findings.is_empty() {
+        // Fallback: no per-site `findings[]`, so use the property-level
+        // `trace` rollup plus `function_summaries` data-flow hints.
+        let mut flagged: Vec<&FvCheck> = fv.checks.iter().filter(|c| c.is_finding()).collect();
+        flagged.sort_by_key(|c| c.severity != Severity::Error);
+        for c in &flagged {
+            println!(
+                "      {}  {} ({}, {} finding(s))",
+                severity_mark(c.severity),
+                c.title,
+                c.code,
+                c.findings
+            );
+        }
+        // `function_summaries` reports data-flow facts (signed params /
+        // value writes) present even on clean contracts, so gate the
+        // fix-site hints on a flagged check to explain — otherwise this
+        // misreports verified programs.
+        let sites: Vec<&FvFunction> = if flagged.is_empty() {
+            Vec::new()
         } else {
-            "warn "
+            fv.functions.iter().filter(|f| f.is_flagged()).collect()
         };
-        println!(
-            "      {mark}  {} ({}, {} finding(s))",
-            c.title, c.code, c.findings
-        );
-    }
-    // Pinpoint the fix sites: functions whose signed params / value
-    // writes drive the value-safety findings above.
-    let flagged: Vec<&FvFunction> = fv.functions.iter().filter(|f| f.is_flagged()).collect();
-    if !flagged.is_empty() {
-        println!("      at:");
-        for f in flagged {
-            let mut bits = Vec::new();
-            if !f.signed_params.is_empty() {
-                bits.push(format!("signed params [{}]", f.signed_params.join(", ")));
+        if !sites.is_empty() {
+            println!("      at:");
+            for f in sites {
+                let mut bits = Vec::new();
+                if !f.signed_params.is_empty() {
+                    bits.push(format!("signed params [{}]", f.signed_params.join(", ")));
+                }
+                if !f.value_writes.is_empty() {
+                    bits.push(format!("value writes [{}]", f.value_writes.join(", ")));
+                }
+                println!("        {}: {}", f.name, bits.join("; "));
             }
-            if !f.value_writes.is_empty() {
-                bits.push(format!("value writes [{}]", f.value_writes.join(", ")));
+        }
+    } else {
+        // Preferred: per-site findings name the exact function + parameter
+        // /field, rendered `fn(param): message [code]`.
+        let mut sites: Vec<&FvFinding> = fv.findings.iter().collect();
+        sites.sort_by_key(|f| f.severity != Severity::Error);
+        for f in sites {
+            let mark = severity_mark(f.severity);
+            let loc = f.location();
+            if loc.is_empty() {
+                println!("      {mark}  {}  [{}]", f.message, f.code);
+            } else {
+                println!("      {mark}  {loc}: {}  [{}]", f.message, f.code);
             }
-            println!("        {}: {}", f.name, bits.join("; "));
         }
     }
     !fv.has_failures()
+}
+
+/// CLI mark for a finding's severity, fixed-width so locations align.
+fn severity_mark(s: Severity) -> &'static str {
+    match s {
+        Severity::Error => "error",
+        Severity::Warning => "warn ",
+        Severity::Info => "info ",
+    }
 }
 
 #[cfg(test)]
@@ -325,7 +413,15 @@ mod tests {
                     {"code": "supply_invariant_unproven", "title": "conservation", "status": "pass",
                      "severity": "warning", "findings": 0}
                 ],
-                "function_summaries": [{"name": "deposit", "value_writes": ["deposits"]}]
+                "function_summaries": [{"name": "deposit", "value_writes": ["deposits"]}],
+                "findings": [
+                    {"severity": "error", "code": "signed_value_storage",
+                     "message": "value-like storage must not use signed int",
+                     "function_name": "deposit", "state_field": "deposits", "parameter": null},
+                    {"severity": "warning", "code": "unchecked_transfer_result",
+                     "message": "native transfer result should be checked",
+                     "function_name": "withdraw", "state_field": null, "parameter": null}
+                ]
             }
         })
     }
@@ -344,6 +440,12 @@ mod tests {
         // 2 of the 3 trace entries are findings (the `pass` one is not).
         let findings = fv.checks.iter().filter(|c| c.is_finding()).count();
         assert_eq!(findings, 2);
+        // Per-site `findings[]` parsed with concrete locations — the
+        // signal octrascan lists per contract.
+        assert_eq!(fv.findings.len(), 2);
+        assert_eq!(fv.findings[0].location(), "deposit.deposits");
+        assert_eq!(fv.findings[1].location(), "withdraw");
+        assert_eq!(fv.findings[0].severity, Severity::Error);
     }
 
     #[test]
