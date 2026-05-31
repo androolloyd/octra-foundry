@@ -57,9 +57,32 @@ impl FvCheck {
     }
 }
 
+/// Per-function data-flow summary from the verifier. `signed_params`
+/// and `value_writes` are what make the value-safety checks actionable:
+/// they pinpoint the exact function (and field/param) behind each
+/// finding, so `signed_value_parameter` / `signed_value_storage` errors
+/// map to a concrete fix site.
+#[derive(Debug, Clone, Serialize)]
+pub struct FvFunction {
+    pub name: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub signed_params: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub value_writes: Vec<String>,
+}
+
+impl FvFunction {
+    /// A function the value-safety checks flagged (signed param or
+    /// signed write into a value-like field).
+    #[must_use]
+    pub fn is_flagged(&self) -> bool {
+        !self.signed_params.is_empty() || !self.value_writes.is_empty()
+    }
+}
+
 /// The `aml_safety_report_v1` formal-verification audit. This is the
 /// structure octrascan renders; `raw` keeps the full payload
-/// (function_summaries, invariants, proof_model, …).
+/// (invariants, proof_model, …).
 #[derive(Debug, Clone, Serialize)]
 pub struct FvAudit {
     pub schema: String,
@@ -72,6 +95,7 @@ pub struct FvAudit {
     pub errors: u64,
     pub warnings: u64,
     pub checks: Vec<FvCheck>,
+    pub functions: Vec<FvFunction>,
     pub raw: Value,
 }
 
@@ -149,6 +173,11 @@ fn parse_fv(v: &Value) -> Option<FvAudit> {
         .and_then(Value::as_array)
         .map(|arr| arr.iter().map(parse_check).collect())
         .unwrap_or_default();
+    let functions = fv
+        .get("function_summaries")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().map(parse_function).collect())
+        .unwrap_or_default();
 
     Some(FvAudit {
         schema: str_field(fv, "schema").unwrap_or_else(|| "unknown".into()),
@@ -159,8 +188,28 @@ fn parse_fv(v: &Value) -> Option<FvAudit> {
         errors: fv.get("errors").and_then(Value::as_u64).unwrap_or(0),
         warnings: fv.get("warnings").and_then(Value::as_u64).unwrap_or(0),
         checks,
+        functions,
         raw: fv.clone(),
     })
+}
+
+fn parse_function(f: &Value) -> FvFunction {
+    let strs = |key: &str| {
+        f.get(key)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    FvFunction {
+        name: str_field(f, "name").unwrap_or_default(),
+        signed_params: strs("signed_params"),
+        value_writes: strs("value_writes"),
+    }
 }
 
 fn parse_check(c: &Value) -> FvCheck {
@@ -233,6 +282,22 @@ fn render_fv(fv: &FvAudit) -> bool {
             "      {mark}  {} ({}, {} finding(s))",
             c.title, c.code, c.findings
         );
+    }
+    // Pinpoint the fix sites: functions whose signed params / value
+    // writes drive the value-safety findings above.
+    let flagged: Vec<&FvFunction> = fv.functions.iter().filter(|f| f.is_flagged()).collect();
+    if !flagged.is_empty() {
+        println!("      at:");
+        for f in flagged {
+            let mut bits = Vec::new();
+            if !f.signed_params.is_empty() {
+                bits.push(format!("signed params [{}]", f.signed_params.join(", ")));
+            }
+            if !f.value_writes.is_empty() {
+                bits.push(format!("value writes [{}]", f.value_writes.join(", ")));
+            }
+            println!("        {}: {}", f.name, bits.join("; "));
+        }
     }
     !fv.has_failures()
 }
