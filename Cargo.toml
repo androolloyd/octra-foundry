@@ -6,6 +6,7 @@ members = [
     "crates/octra-mock-rpc",
     "crates/octra-cli",
     "crates/octra-devkeys",
+    "crates/octra-chain-backend",
 ]
 
 [workspace.lints.clippy]

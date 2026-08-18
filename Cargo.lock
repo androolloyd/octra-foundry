@@ -1220,6 +1220,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "octra-chain-backend"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "hex",
+ "octra-core",
+ "octra-mock-rpc",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "octra-cli"
 version = "0.1.0"
 dependencies = [
