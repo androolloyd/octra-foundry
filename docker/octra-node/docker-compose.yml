@@ -1,0 +1,79 @@
+# A single real Octra lite node in Single mode, for local development.
+#
+# Single mode is selected by LEAVING OCTRA_CONSENSUS_MODE UNSET
+# (upstream lib/consensus/c_role.ml:12-22): no peers, no quorum, no
+# stake — the node applies an epoch from its staged txs every 10s
+# (consensus_tick_plan.ml:115-123, epoch_time.ml:10-11). Do not "fix"
+# an apparently missing OCTRA_CONSENSUS_MODE here.
+#
+# Genesis: on an empty ledger the node mints 100M OCT split evenly
+# across OCTRA_VALIDATORS (startup_account_shell.ml:40-87) — 10M OCT to
+# each of the ten octra-devkeys accounts below. The addr:pubkey pairs
+# and the node wallet are generated, deterministically, by:
+#
+#     cargo run -p octra-devkeys -- validators-env
+#     cargo run -p octra-devkeys -- wallet-json 0
+#
+# and pinned as golden values in that crate's tests, so drift between
+# this file and the crate fails `cargo test -p octra-devkeys`. These
+# keys are PUBLIC — this compose file must never point at a network
+# holding real funds.
+
+services:
+  octra-node:
+    build:
+      context: .
+      args:
+        # Upstream octra-labs/lite_node GIT commit this image builds
+        # (not the in-tree SOURCE_COMMIT release-marker file). Upstream
+        # cuts epoch-gated releases weekly; bump deliberately, never
+        # track main.
+        SOURCE_COMMIT: dd342e754c91df55a41b515c510369d637af2385
+    image: octra-foundry/octra-node:dd342e7
+    environment:
+      # Private chain id — anything but devnet's
+      # "octra-devnet-9871-cluster", so txs/state can never be confused
+      # with a real network.
+      OCTRA_CHAIN_ID: octra-foundry-local
+      OCTRA_DATA_DIR: /octra/data
+      OCTRA_VALIDATORS: "oct1fKQS6gwqbVUFnzMSVsNRcY7aeJE5Kt84uq55mLAsH3r:DcVw9lEfzSxuM9V1ROmKJQq6Mybz0BG/9XImA4kfQDI=,oct21vtY7jGprbS5gzL7Crxu22GJhXVQwCzfNmBCgGHvC72:sp+3RZzqiSbuv2Gd2ptqPF8BGjaiEfF65apMtp3EtKs=,octEfyBH8nq6YbVspRYhCnWXsbM7UopJt1rk3DixJggb8GP:5dL/EPzRpxS/Xr4aiRNZNN5i8KNa+F0GX3jje5ddoyI=,octH4AFtmpTmezJKxKCZ4wUHjDVS78vEXpmkjLg1DzmQ8dq:k3FwmGXi3I5z3rU9m28QkZWkPuZLymdU2WnlS0rE4BY=,oct7TMi64mtRYXZ7jQPdTUbAc7774KsXykHTVuMsSSch1zJ:2UKljDakccgg3togUKo9WXD6pjhTYbkXB5+iMo1m7iY=,oct78d9RxFufJHD6RonAT5JWY5zUogAhLh7xa9oHWJW9CkY:XSDVYtk2PHDnHZPt44LH1wf6BYxLjhsff/Zzi0Kdrwk=,octEgfmbNJoXnBqQ3KcL5JXMvjd77Nk1wsKPCnh1hBiaF5j:n5md3kYgSyNiqY2EVZg2WNO8nF5QWQ8h/7lBwFNunMQ=,octGn5wKZR1Wfh7A2nA7UC3znixUogy8TwcHMCX4erHzDBc:sCpf47ysXojA+5h0DBxLe4pej5JuvkXmdRvTt6RysA4=,octDsU65W5JygSZFhU8UGnkfAz9rQJXs5natsTC9VALteta:SFFVIRkROp5zGzDrvuW3mpc080Li+YhOitp6BSPh/kE=,octFDqPsZkAirxQ87fm3bkiZpA8fXASAMZnRe8dBbHrRjfJ:xJmAZYZA7zICQC4Xx3Q2qIHUjNTbUhRWTL5U0JkLvpk="
+      # Devkey 0 as the node's own wallet identity, written by the
+      # entrypoint on first boot only (before the node would otherwise
+      # generate a random one).
+      OCTRA_DEV_WALLET_JSON: '{"priv":"BXEAzrEkFjPnRqtwNl2Y4uQwbNYq7ngc85rltQbSzGo=","pub":"DcVw9lEfzSxuM9V1ROmKJQq6Mybz0BG/9XImA4kfQDI=","address":"oct1fKQS6gwqbVUFnzMSVsNRcY7aeJE5Kt84uq55mLAsH3r"}'
+    ports:
+      # Container API port is the node default 8080
+      # (startup_process_shell.ml:66); 18080 on the host matches
+      # `octra anvil`'s default port so clients need no reconfiguring.
+      # Loopback only — this chain's keys are public.
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - octra-node-data:/octra/data
+    # REQUIRED: the pvac worker refuses to run with init as its parent —
+    # it SIGKILLs itself when getppid() == 1 (an orphan guard,
+    # pvac_ffi/pvac_stubs.cpp caml_pvac_worker_isolate). Without an init
+    # process the node IS PID 1, every spawned worker sees ppid == 1,
+    # and boot dies with "proof worker failed: worker_signal_-7".
+    init: true
+    healthcheck:
+      # Prove the RPC actually answers, not merely that the process
+      # exists: POST a real JSON-RPC method to /rpc (the only RPC
+      # route, rpc_http.ml:90-95). The server only starts responding
+      # once the ledger/store are open, which is exactly the readiness
+      # we care about.
+      test:
+        - CMD-SHELL
+        - >
+          curl -fsS -X POST -H 'Content-Type: application/json'
+          --data '{"jsonrpc":"2.0","id":1,"method":"octra_runtimeVersion","params":[]}'
+          http://127.0.0.1:8080/rpc > /dev/null
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      # First boot replays genesis; give it slack before counting
+      # failures.
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  octra-node-data:

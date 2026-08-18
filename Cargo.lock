@@ -1274,6 +1274,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "octra-devkeys"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "hex",
+ "octra-core",
+]
+
+[[package]]
 name = "octra-mock-rpc"
 version = "0.1.0"
 dependencies = [

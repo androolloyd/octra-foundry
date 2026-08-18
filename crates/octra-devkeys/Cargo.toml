@@ -1,0 +1,21 @@
+[package]
+name = "octra-devkeys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Well-known deterministic dev accounts for the local octra-node, anvil-style. PUBLIC keys — never fund them on a real network."
+
+[dependencies]
+base64        = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex           = { workspace = true }
+octra-core    = { workspace = true }
+
+[[bin]]
+name = "octra-devkeys"
+path = "src/main.rs"
+
+[lints]
+workspace = true
