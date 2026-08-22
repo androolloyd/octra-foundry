@@ -19,6 +19,9 @@ use serde_json::{json, Value};
 use tokio::time::sleep;
 
 async fn spawn_anvil(port: u16, prog: &str) -> Arc<()> {
+    // HTTP `octra_submit` only stages; the mock applies on a timer.
+    // Shorten the tick so these tests don't wait a real 10s epoch.
+    std::env::set_var("OCTRA_MOCK_EPOCH_MS", "50");
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let p = prog.to_string();
     tokio::spawn(async move {
@@ -26,6 +29,10 @@ async fn spawn_anvil(port: u16, prog: &str) -> Arc<()> {
     });
     sleep(Duration::from_millis(150)).await;
     Arc::new(())
+}
+
+async fn wait_one_epoch() {
+    sleep(Duration::from_millis(120)).await;
 }
 
 fn http_url(port: u16) -> String {
@@ -153,9 +160,12 @@ async fn http_anvil_matches_inprocess_view() {
     let http_view = rpc_contract_call(&http_url(18301), "octPROG", "get_params", &[])
         .await
         .unwrap();
+    // The node (and now the mock) wraps views as `{result, storage}`.
+    // Forge's in-process helper unwraps `result`; compare that field.
+    let http_result = http_view.get("result").cloned().unwrap_or(http_view);
 
     assert_eq!(
-        forge_view, http_view,
+        forge_view, http_result,
         "forge vs http view drift on get_params"
     );
 }
@@ -193,9 +203,10 @@ async fn http_anvil_register_then_list_matches_forge() {
         ],
         "value": 0u64,
         "fee": 10u64,
-        "nonce": 0u64,
+        "nonce": 1u64,
     });
     rpc_call(&url, "octra_submit", json!([tx])).await.unwrap();
+    wait_one_epoch().await;
 
     let http_active = rpc_contract_call(
         &url,
@@ -205,6 +216,7 @@ async fn http_anvil_register_then_list_matches_forge() {
     )
     .await
     .unwrap();
+    let http_active = http_active.get("result").cloned().unwrap_or(http_active);
 
     // Reproduce the same flow in-process.
     let mut forge = ForgeCtx::with_program("octPROG");

@@ -1227,6 +1227,7 @@ dependencies = [
  "base64",
  "hex",
  "octra-core",
+ "octra-devkeys",
  "octra-mock-rpc",
  "parking_lot",
  "reqwest",

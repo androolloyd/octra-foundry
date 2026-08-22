@@ -19,13 +19,47 @@
 //!     Single mode, 10s epochs, deterministic genesis from `octra-devkeys`.
 //!   * **fork** — a node booted on real devnet state via state sync.
 //!
-//! ## Status
+//! ## The shape
 //!
-//! **Scaffolding.** [`canonical_tx`] and [`error`] are complete and tested;
-//! the `ChainBackend` trait itself and the Mock/Node backends are not written
-//! yet. This crate is committed in this state deliberately — the signer port
-//! is the load-bearing piece and is worth having under test now — but nothing
-//! here drives a test suite yet.
+//! One trait, [`ChainBackend`], with three things bolted down:
+//!
+//!   1. **Submit stages; it does not confirm.** [`backend::Staged`] has a
+//!      hash and no status field, so no backend can hand back a value
+//!      meaning "confirmed". Confirmation lives in
+//!      [`ConfirmExt::await_confirmation`], supplied by a *blanket* impl
+//!      over every `T: ChainBackend` — coherence forbids a backend from
+//!      substituting its own. This is the enforcement behind "a backend
+//!      must not be able to pretend a submit confirmed".
+//!   2. **Waiting is advancing epochs.** `await_confirmation` waits by
+//!      calling [`ChainBackend::advance_epochs`], because on the real
+//!      chain that is literally what waiting is. The mock implements it
+//!      by draining its own staging queue, so one test body means the
+//!      same thing on both tiers.
+//!   3. **Cheats are off the trait.** Faucets, forced owners and epoch
+//!      warps are inherent methods on [`MockBackend`]. A test that wants
+//!      one names `&MockBackend` and then cannot be handed a node — a
+//!      compile error, not a runtime surprise. [`ChainBackend::as_mock`]
+//!      is the runtime fallback for tier-parameterised suites, and it
+//!      fails with [`BackendError::MockOnly`] naming the cheat and tier.
+//!
+//! ## Choosing a backend in a test
+//!
+//! ```ignore
+//! use octra_chain_backend::{harness, skip_unless_backend, ConfirmExt};
+//!
+//! #[tokio::test]
+//! async fn settles() {
+//!     let chain = skip_unless_backend!(
+//!         harness::money_path_backend_from_env().await.unwrap(),
+//!         "settles"
+//!     );
+//!     // …
+//! }
+//! ```
+//!
+//! An absent node SKIPS with the compose command to fix it, so `cargo
+//! test` works on a laptop with no docker; `OCTRA_TEST_STRICT=1` turns
+//! every skip into a failure for CI.
 //!
 //! ## Why the signer is duplicated
 //!
@@ -37,14 +71,25 @@
 //! shows up as a failing golden rather than as a silent code 101. If a third
 //! copy is ever needed, extract a shared crate instead.
 
+pub mod backend;
 pub mod canonical_tx;
 pub mod error;
+pub mod harness;
+pub mod mock;
+pub mod node;
 pub mod tier;
 
+pub use backend::{
+    wall_clock_secs, Account, ChainBackend, ConfirmBudget, ConfirmExt, Confirmed, Receipt, Staged,
+    TxStatus, ViewResult,
+};
 pub use canonical_tx::{
     canonical_tx_from_call, sign_call_canonical, yojson_float, CanonicalTx, OP_CALL,
     OP_CIRCLE_CALL, OP_CIRCLE_INGRESS_COMMIT, OP_CIRCLE_OUTBOX_OPEN, OP_CIRCLE_RELAY_CANCEL,
     OP_CIRCLE_RELAY_CLAIM, OP_DEPLOY_CIRCLE, OP_STANDARD,
 };
 pub use error::{BackendError, BackendResult};
+pub use harness::{backend_for_tier, backend_from_env, money_path_backend_from_env, Harness};
+pub use mock::MockBackend;
+pub use node::{NodeBackend, DEFAULT_NODE_RPC, EPOCH_INTERVAL};
 pub use tier::{Tier, TIER_ENV};

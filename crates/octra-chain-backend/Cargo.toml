@@ -29,6 +29,11 @@ tracing     = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The ten well-known dev accounts the local node's genesis mints. Only
+# the tier-2 integration test needs them, and — like async-trait above —
+# this stays out of [workspace.dependencies] because this crate is its
+# only user and the workspace manifest is shared with other agents' work.
+octra-devkeys = { path = "../octra-devkeys" }
 
 [lints]
 workspace = true
