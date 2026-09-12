@@ -225,10 +225,18 @@ fn cast_transfer(
     } else {
         let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
             .context("fetch balance for nonce")?;
-        bal.get("nonce")
+        // Next nonce is max(nonce, pending_nonce) + 1, the same rule forge
+        // create uses. Reading only `nonce` ignored txs still sitting in
+        // staging (octra_submit only stages; the epoch applies ~10s later),
+        // so two transfers in a row collided: the second reused the
+        // first's nonce and the node refused it with
+        // 105 "duplicate nonce (fee rate bump < 10%)".
+        let committed = bal.get("nonce").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let pending = bal
+            .get("pending_nonce")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0)
-            + 1
+            .unwrap_or(0);
+        committed.max(pending) + 1
     };
     let mut tx = json!({
         "from": from,
