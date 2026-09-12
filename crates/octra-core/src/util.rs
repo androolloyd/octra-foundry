@@ -171,9 +171,15 @@ pub const KEY_PASSPHRASE_ENV: &str = "OCTRAVPN_KEY_PASSPHRASE";
 /// key under the passphrase envelope. Kept here so the same string
 /// appears in error messages and in `octravpn-node seal-keys --help`.
 fn suggest_seal_cmd(path: &str) -> String {
+    // The real CLI is `octravpn-node --config <node.toml> seal-keys`, which
+    // reads every key path from the config and writes `<path>.sealed`
+    // beside it. An earlier hint here advertised `--in/--out` flags that
+    // never existed; an operator who copy-pasted it got a clap error on
+    // top of the boot failure.
     format!(
-        "octravpn-node seal-keys --in {path} --out {path}.sealed \
-         (then export {KEY_PASSPHRASE_ENV}=... and re-point your TOML at the sealed file)"
+        "octravpn-node --config <node.toml> seal-keys --passphrase-file <file> \
+         (wallet_secret_path/wg_secret_path in that config must point at {path}; \
+         then point them at {path}.sealed and export OCTRAVPN_KEY_PASSPHRASE)"
     )
 }
 
@@ -224,6 +230,15 @@ fn json_logs() -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// `std::env::set_var`/`remove_var` are process-global and cargo runs
+    /// tests in parallel, so any two tests that touch the passphrase env
+    /// vars race each other (observed: `read_secret_32_or_sealed_env_passphrase`
+    /// failing only when run alongside its siblings). Every test that reads
+    /// or writes those vars takes this lock first.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
     use super::*;
 
     #[test]
@@ -248,6 +263,7 @@ mod tests {
     // parallel by default.
     #[test]
     fn read_secret_32_envelope_paths() {
+        let _env = env_guard();
         let secret = [42u8; 32];
         let enc = wallet_enc::encrypt_secret_with_iters(&secret, "pw", 100);
         let dir = tempfile::tempdir().unwrap();
@@ -268,6 +284,7 @@ mod tests {
     /// resulting error MUST carry the suggested CLI for sealing it.
     #[test]
     fn read_secret_32_or_sealed_rejects_plaintext_hex() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wallet.key");
         // Plaintext hex on disk — the v1 / devnet shape.
@@ -280,9 +297,12 @@ mod tests {
                 suggested_cmd,
             } => {
                 assert_eq!(p, path.to_str().unwrap());
+                // The real CLI is `octravpn-node --config <toml> seal-keys
+                // --passphrase-file <f>`; assert on the part an operator will
+                // actually type, not on a spelling that has no such flags.
                 assert!(
-                    suggested_cmd.contains("octravpn-node seal-keys"),
-                    "suggested_cmd should name the seal-keys CLI: {suggested_cmd}"
+                    suggested_cmd.contains("seal-keys --passphrase-file"),
+                    "suggested_cmd should name the real seal-keys CLI: {suggested_cmd}"
                 );
                 assert!(
                     suggested_cmd.contains(path.to_str().unwrap()),
@@ -297,6 +317,7 @@ mod tests {
     /// v1 `read_secret_32` accepts both shapes, so we test both here.
     #[test]
     fn read_secret_32_or_sealed_rejects_raw_bytes() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wallet.bin");
         std::fs::write(&path, [7u8; 32]).unwrap();
@@ -310,6 +331,7 @@ mod tests {
     /// the round-trip surface the seal-keys CLI relies on.
     #[test]
     fn read_secret_32_or_sealed_hint_passphrase() {
+        let _env = env_guard();
         let secret = [0xA5u8; 32];
         let enc = wallet_enc::encrypt_secret_with_iters(&secret, "rosebud", 100);
         let dir = tempfile::tempdir().unwrap();
@@ -326,6 +348,7 @@ mod tests {
     /// don't leak state across tests.
     #[test]
     fn read_secret_32_or_sealed_env_passphrase() {
+        let _env = env_guard();
         let secret = [0xC3u8; 32];
         let enc = wallet_enc::encrypt_secret_with_iters(&secret, "tarpit", 100);
         let dir = tempfile::tempdir().unwrap();
