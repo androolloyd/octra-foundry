@@ -58,6 +58,15 @@ pub struct CreateArgs {
     /// Fee in OU (defaults to 50_000_000, the webcli default).
     #[arg(long)]
     pub ou: Option<u64>,
+    /// Do not wait for the epoch apply; print the staged tx_hash and the
+    /// PREDICTED address only. The prediction can be wrong (see the
+    /// receipt logic in `run`), so prefer the default unless you poll.
+    #[arg(long, default_value_t = false)]
+    pub no_wait: bool,
+    /// How long to wait for the execution receipt. Epochs apply every 10s
+    /// (epoch_time.ml:10-11); three epochs covers one late tick.
+    #[arg(long, default_value_t = 45)]
+    pub wait_secs: u64,
 }
 
 pub fn run(args: &CreateArgs) -> Result<()> {
@@ -172,16 +181,100 @@ pub fn run(args: &CreateArgs) -> Result<()> {
     let signed = octra_core::tx::sign_call(&kp, envelope).map_err(|e| anyhow!("sign_call: {e}"))?;
     let res = rpc_client::call(&endpoint, "octra_submit", json!([signed]))?;
 
+    // octra_submit only STAGES (rpc_view.ml:706-712) and answers
+    // {tx_hash, status:"accepted", nonce, ou_cost} — there is no `hash`
+    // and no `address` in that response, which is why this used to print
+    // an empty tx_hash and could only ever echo back its own prediction.
+    let tx_hash = res
+        .get("tx_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let staged_status = res.get("status").and_then(|v| v.as_str()).unwrap_or("");
+
+    // The predicted address is a guess made before the epoch applied.
+    // Since the Rehovot compiler the node derives the program address at
+    // apply time from the deploy PACKAGE it actually executes
+    // (consensus_epoch_vm_shell.ml:759, `addr_from_code package.envelope
+    // tx.from tx.nonce`), and on devnet that has diverged from what
+    // `octra_computeContractAddress` returns for the bare bytecode. The
+    // execution receipt is the only authoritative source, so wait for the
+    // epoch and read the address off it. `--no-wait` keeps the old
+    // fire-and-forget behaviour for callers that poll themselves.
+    let mut resolved_address: Option<String> = None;
+    let mut receipt_note = String::new();
+    if !is_mock && !args.no_wait && !tx_hash.is_empty() {
+        match wait_for_receipt(&endpoint, &tx_hash, args.wait_secs) {
+            Ok(receipt) => {
+                let ok = receipt.get("success").and_then(Value::as_bool).unwrap_or(false);
+                let err = receipt.get("error").and_then(Value::as_str).unwrap_or("");
+                if !ok {
+                    return Err(anyhow!(
+                        "deploy tx {tx_hash} applied but execution failed: {err}"
+                    ));
+                }
+                resolved_address = receipt
+                    .get("program")
+                    .or_else(|| receipt.get("contract"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                if let Some(actual) = &resolved_address {
+                    if actual != &address {
+                        receipt_note = format!(
+                            "predicted {address} but the chain deployed at {actual} \
+                             (address taken from the execution receipt)"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                receipt_note = format!("could not confirm via receipt: {e}");
+            }
+        }
+    }
+
     dump_json(&json!({
-        "address": res
-            .get("address")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&address),
-        "tx_hash": res.get("hash").and_then(|v| v.as_str()).unwrap_or(""),
+        "address": resolved_address.as_deref().unwrap_or(&address),
+        "predicted_address": address,
+        "tx_hash": tx_hash,
+        "staged_status": staged_status,
+        "confirmed": resolved_address.is_some(),
+        "note": receipt_note,
         "name": name,
         "compiler": artifact.get("compiler").cloned().unwrap_or(Value::Null),
     }));
     Ok(())
+}
+
+/// Poll `octra_transaction` until the tx reaches a terminal status, then
+/// fetch its `contract_receipt`. `rejected`/`dropped` carry the node's
+/// reason verbatim (history_read_rpc.ml:131-175) and surface as errors.
+fn wait_for_receipt(
+    endpoint: &crate::rpc_client::Endpoint,
+    tx_hash: &str,
+    wait_secs: u64,
+) -> Result<Value> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    loop {
+        let st = rpc_client::call(endpoint, "octra_transaction", json!([tx_hash]))?;
+        match st.get("status").and_then(Value::as_str) {
+            Some("confirmed") => {
+                return rpc_client::call(endpoint, "contract_receipt", json!([tx_hash]));
+            }
+            Some(s @ ("rejected" | "dropped")) => {
+                let reason = st.get("reason").and_then(Value::as_str).unwrap_or("unspecified");
+                return Err(anyhow!("deploy tx {tx_hash} {s}: {reason}"));
+            }
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "deploy tx {tx_hash} still not terminal after {wait_secs}s (last status: {})",
+                st.get("status").and_then(Value::as_str).unwrap_or("?")
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
 }
 
 /// Mock-path deploy-address synthesis. Mirrors the mock's

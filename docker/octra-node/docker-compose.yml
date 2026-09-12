@@ -28,8 +28,8 @@ services:
         # (not the in-tree SOURCE_COMMIT release-marker file). Upstream
         # cuts epoch-gated releases weekly; bump deliberately, never
         # track main.
-        SOURCE_COMMIT: dd342e754c91df55a41b515c510369d637af2385
-    image: octra-foundry/octra-node:dd342e7
+        SOURCE_COMMIT: 9e7ee19af38ba020497566ac73c268f42b20b9a4
+    image: octra-node:9e7ee19a
     environment:
       # Private chain id — anything but devnet's
       # "octra-devnet-9871-cluster", so txs/state can never be confused
