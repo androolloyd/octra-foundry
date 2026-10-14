@@ -7,7 +7,8 @@
 # foundry workspace`) verified the workspace passes locally; this
 # workflow ratchets that into a per-PR gate.
 #
-# Modeled on octra/.github/workflows/ci.yml.
+# Match OctraVPN's pinned 1.96.0 toolchain and locked dependency graph.
+# Deliberately upgrade both workspaces together so lint gates do not drift.
 
 name: CI
 
@@ -28,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: "1.96.0"
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -39,14 +40,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: "1.96.0"
           components: clippy
       - uses: Swatinem/rust-cache@v2
       # Workspace `[workspace.lints]` already pins all + pedantic +
       # nursery at warn; the `-D warnings` flag promotes to deny so
       # this run matches the octra workspace's CI gate exactly.
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo clippy --workspace --tests -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --tests -- -D warnings
 
   test:
     name: cargo test
@@ -55,7 +56,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: "1.96.0"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace
-      - run: cargo test --workspace
+      - run: cargo build --locked --workspace
+      - run: cargo test --locked --workspace
