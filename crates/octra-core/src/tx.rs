@@ -1,3 +1,8 @@
+//! Protocol scope: the `chain_id` envelope extension below is MODEL-ONLY.
+//! Native Octra transaction.ml ignores that field and signs no such binding;
+//! signatures including it cannot verify on a native node. CLI HTTP paths reject it.
+//! Receipt domain binding remains a separate application-level guarantee.
+//!
 //! Octra transaction signing — canonical form per
 //! `octra-labs/webcli/lib/tx_builder.hpp:78-92` (cross-confirmed by the
 //! Rust `ocs01-test` and Python `octra_pre_client` references).

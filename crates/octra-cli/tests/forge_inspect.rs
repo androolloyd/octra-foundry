@@ -29,7 +29,7 @@ fn inspect_aml_file_dumps_abi() {
     let aml = dir.path().join("main.aml");
     fs::write(&aml, FIXTURE_AML).unwrap();
     cmd()
-        .args(["forge", "inspect"])
+        .args(["forge", "inspect", "--mock"])
         .arg(&aml)
         .arg("--field")
         .arg("abi")
@@ -44,7 +44,7 @@ fn inspect_aml_file_dumps_bytecode() {
     let aml = dir.path().join("main.aml");
     fs::write(&aml, FIXTURE_AML).unwrap();
     cmd()
-        .args(["forge", "inspect"])
+        .args(["forge", "inspect", "--mock"])
         .arg(&aml)
         .arg("--field")
         .arg("bytecode")

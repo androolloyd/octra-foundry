@@ -47,6 +47,10 @@ pub enum CircleCmd {
     Predict(PredictArgs),
     /// Submit a `deploy_circle` tx and print the resulting id.
     Deploy(DeployArgs),
+    /// Read a Circle application method.
+    Call(super::circle_call::CallArgs),
+    /// Sign and submit a Circle application update.
+    Send(super::circle_call::SendArgs),
     /// Call `circle_info` for an existing circle.
     Info(InfoArgs),
     /// Fetch a plaintext asset by path.
@@ -230,6 +234,8 @@ pub fn dispatch(cmd: CircleCmd) -> Result<()> {
     match cmd {
         CircleCmd::Predict(a) => predict(&a),
         CircleCmd::Deploy(a) => deploy(&a),
+        CircleCmd::Call(a) => super::circle_call::call(&a),
+        CircleCmd::Send(a) => super::circle_call::send(&a),
         CircleCmd::Info(a) => info(&a),
         CircleCmd::Asset(a) => asset(&a),
         CircleCmd::AssetKey(a) => asset_key(&a),
@@ -277,13 +283,7 @@ fn deploy(args: &DeployArgs) -> Result<()> {
         .to_string();
     let endpoint = rpc_client::endpoint_from_url(&args.rpc_url);
 
-    let resolved_nonce = if let Some(n) = args.nonce {
-        n
-    } else {
-        let bal = rpc_client::call(&endpoint, "octra_balance", json!([&from]))
-            .context("fetch balance for nonce")?;
-        bal.get("nonce").and_then(Value::as_u64).unwrap_or(0) + 1
-    };
+    let resolved_nonce = super::circle_call::nonce(&endpoint, &from, args.nonce)?;
 
     let circle_id = circle_id_of_deploy(&from, resolved_nonce, &payload);
     let message = canonical_payload_json(&payload);
@@ -298,7 +298,7 @@ fn deploy(args: &DeployArgs) -> Result<()> {
         "op_type": "deploy_circle",
         "message": message,
     });
-    let signed = octra_core::tx::sign_call(&kp, tx).map_err(|e| anyhow!("sign_call: {e}"))?;
+    let signed = crate::io::sign_call(&kp, tx).map_err(|e| anyhow!("sign_call: {e}"))?;
     let result = rpc_client::call(&endpoint, "octra_submit", json!([signed]))
         .context("submit deploy_circle")?;
 
@@ -406,7 +406,7 @@ fn put_plaintext(args: &PutArgs) -> Result<()> {
         "encrypted_data": plaintext_b64,
         "message": payload.to_string(),
     });
-    let signed = octra_core::tx::sign_call(&kp, tx).map_err(|e| anyhow!("sign_call: {e}"))?;
+    let signed = crate::io::sign_call(&kp, tx).map_err(|e| anyhow!("sign_call: {e}"))?;
     let result = rpc_client::call(&endpoint, "octra_submit", json!([signed]))
         .context("submit circle_asset_put")?;
 
@@ -480,7 +480,7 @@ fn put_encrypted(args: &PutEncryptedArgs) -> Result<()> {
         "encrypted_data": ciphertext_b64,
         "message": payload.to_string(),
     });
-    let signed = octra_core::tx::sign_call(&kp, tx).map_err(|e| anyhow!("sign_call: {e}"))?;
+    let signed = crate::io::sign_call(&kp, tx).map_err(|e| anyhow!("sign_call: {e}"))?;
     let result = rpc_client::call(&endpoint, "octra_submit", json!([signed]))
         .context("submit circle_asset_put_encrypted")?;
 

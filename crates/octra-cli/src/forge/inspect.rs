@@ -13,7 +13,7 @@ use anyhow::{anyhow, Result};
 use clap::Args;
 use serde_json::{json, Value};
 
-use crate::{forge::compile, io::dump_json, rpc_client};
+use crate::{io::dump_json, rpc_client};
 
 #[derive(Args, Debug)]
 pub struct InspectArgs {
@@ -29,13 +29,25 @@ pub struct InspectArgs {
     /// RPC URL for address-mode resolution.
     #[arg(long, env = "OCTRA_RPC_URL")]
     pub rpc_url: Option<String>,
+    #[arg(long, env = "AMLC", default_value = "amlc")]
+    pub amlc: PathBuf,
+    /// Explicit synthetic fixture; never deployable.
+    #[arg(long)]
+    pub mock: bool,
 }
 
 pub fn run(args: &InspectArgs) -> Result<()> {
     let artifact = if std::path::Path::new(&args.target).exists() {
-        let src = std::fs::read_to_string(&args.target)?;
-        let name = compile::infer_program_name(&args.target, &src);
-        compile::synthesize_artifact(&name, &src)
+        if args.mock {
+            let source = std::fs::read_to_string(&args.target)?;
+            let name = super::compile::infer_program_name(&args.target, &source);
+            let mut artifact = super::compile::synthesize_artifact(&name, &source);
+            artifact["deployable"] = json!(false);
+            artifact["compiler_backend"] = json!("synthetic-mock");
+            artifact
+        } else {
+            super::amlc::compile(&args.amlc, std::path::Path::new(&args.target))?
+        }
     } else if args.target.starts_with("oct") {
         load_for_address(&args.target, &args.out, args.rpc_url.as_deref())?
     } else {

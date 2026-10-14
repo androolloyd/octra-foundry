@@ -25,13 +25,24 @@ const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 pub const DEFAULT_PBKDF2_ITERS: u32 = 200_000;
+/// Upper bound on file-controlled KDF work; prevents corrupt envelopes from
+/// requesting billions of iterations before their authentication fails.
+pub const MAX_PBKDF2_ITERS: u32 = 1_000_000;
 
 /// Encrypt a 32-byte wallet secret under `passphrase`.
 pub fn encrypt_secret(secret: &[u8; 32], passphrase: &str) -> Vec<u8> {
     encrypt_secret_with_iters(secret, passphrase, DEFAULT_PBKDF2_ITERS)
 }
 
+/// Encrypt using a bounded work factor.
+///
+/// # Panics
+/// Panics if `iters` is zero or exceeds `MAX_PBKDF2_ITERS`.
 pub fn encrypt_secret_with_iters(secret: &[u8; 32], passphrase: &str, iters: u32) -> Vec<u8> {
+    assert!(
+        (1..=MAX_PBKDF2_ITERS).contains(&iters),
+        "PBKDF2 iterations outside supported bounds"
+    );
     let mut salt = [0u8; SALT_LEN];
     OsRng.fill_bytes(&mut salt);
     let mut nonce = [0u8; NONCE_LEN];
@@ -73,6 +84,11 @@ pub fn decrypt_secret(envelope: &[u8], passphrase: &str) -> CoreResult<[u8; 32]>
     let mut iters_arr = [0u8; 4];
     iters_arr.copy_from_slice(&envelope[cursor..cursor + 4]);
     let iters = u32::from_be_bytes(iters_arr);
+    if !(1..=MAX_PBKDF2_ITERS).contains(&iters) {
+        return Err(CoreError::Crypto(
+            "wallet PBKDF2 iterations outside supported bounds".into(),
+        ));
+    }
     cursor += 4;
     let ciphertext = &envelope[cursor..];
 
@@ -126,6 +142,20 @@ mod tests {
         assert!(looks_like_envelope(&enc));
         let got = decrypt_secret(&enc, "correct horse").unwrap();
         assert_eq!(got, secret);
+    }
+
+    #[test]
+    fn untrusted_work_factor_rejected_before_key_derivation() {
+        let envelope = encrypt_secret_with_iters(&[7; 32], "pw", 100);
+        let offset = MAGIC.len() + SALT_LEN + NONCE_LEN;
+        for iterations in [0, MAX_PBKDF2_ITERS + 1, u32::MAX] {
+            let mut corrupt = envelope.clone();
+            corrupt[offset..offset + 4].copy_from_slice(&iterations.to_be_bytes());
+            let error = decrypt_secret(&corrupt, "pw").unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("iterations outside supported bounds"));
+        }
     }
 
     #[test]

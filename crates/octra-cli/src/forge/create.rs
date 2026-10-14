@@ -114,8 +114,11 @@ pub fn run(args: &CreateArgs) -> Result<()> {
     //     `pending_nonce` + `nonce`. The next available nonce is
     //     `max(pending_nonce, nonce) + 1`. The mock always returns 0;
     //     we still treat that as a starting point.
-    let bal = rpc_client::call(&endpoint, "octra_balance", json!([from_addr]))
-        .unwrap_or_else(|_| json!({"nonce": 0u64, "pending_nonce": 0u64}));
+    let bal = match rpc_client::call(&endpoint, "octra_balance", json!([from_addr])) {
+        Ok(balance) => balance,
+        Err(_) if is_mock => json!({"nonce": 0u64, "pending_nonce": 0u64}),
+        Err(error) => return Err(anyhow!("cannot determine deployment nonce: {error}")),
+    };
     let cur_nonce = bal
         .get("nonce")
         .and_then(serde_json::Value::as_u64)
@@ -124,7 +127,10 @@ pub fn run(args: &CreateArgs) -> Result<()> {
         .get("pending_nonce")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let nonce = cur_nonce.max(pending) + 1;
+    let nonce = cur_nonce
+        .max(pending)
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("deployment nonce exhausted"))?;
 
     // (4) Predict the deploy address. Real Octra exposes
     //     `octra_computeContractAddress(bytecode_b64, deployer, nonce)`;
@@ -168,9 +174,8 @@ pub fn run(args: &CreateArgs) -> Result<()> {
         ou: args.ou.unwrap_or(DEFAULT_DEPLOY_OU),
         timestamp: current_timestamp(),
         op_type: OP_DEPLOY.to_string(),
-        // v1 envelope — `forge create` produces wallet-compat bytecode
-        // deploys that match the webcli encoding byte-for-byte. Chain-id
-        // binding (v2) is opt-in via `cast send --chain-id`.
+        // Native wallet-compatible signing. The model-only chain_id
+        // envelope extension is not supported by the native verifier.
         chain_id: None,
         encrypted_data: Some(bytecode.to_string()),
         message,
@@ -178,7 +183,7 @@ pub fn run(args: &CreateArgs) -> Result<()> {
 
     // (6) Sign and submit.
     let envelope = serde_json::to_value(&tx).map_err(|e| anyhow!("serialize tx: {e}"))?;
-    let signed = octra_core::tx::sign_call(&kp, envelope).map_err(|e| anyhow!("sign_call: {e}"))?;
+    let signed = crate::io::sign_call(&kp, envelope).map_err(|e| anyhow!("sign_call: {e}"))?;
     let res = rpc_client::call(&endpoint, "octra_submit", json!([signed]))?;
 
     // octra_submit only STAGES (rpc_view.ml:706-712) and answers
@@ -187,8 +192,10 @@ pub fn run(args: &CreateArgs) -> Result<()> {
     // an empty tx_hash and could only ever echo back its own prediction.
     let tx_hash = res
         .get("tx_hash")
+        .or_else(|| if is_mock { res.get("hash") } else { None })
         .and_then(|v| v.as_str())
-        .unwrap_or("")
+        .filter(|hash| !hash.is_empty())
+        .ok_or_else(|| anyhow!("submit response missing tx_hash: {res}"))?
         .to_string();
     let staged_status = res.get("status").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -206,7 +213,10 @@ pub fn run(args: &CreateArgs) -> Result<()> {
     if !is_mock && !args.no_wait && !tx_hash.is_empty() {
         match wait_for_receipt(&endpoint, &tx_hash, args.wait_secs) {
             Ok(receipt) => {
-                let ok = receipt.get("success").and_then(Value::as_bool).unwrap_or(false);
+                let ok = receipt
+                    .get("success")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let err = receipt.get("error").and_then(Value::as_str).unwrap_or("");
                 if !ok {
                     return Err(anyhow!(
@@ -217,7 +227,13 @@ pub fn run(args: &CreateArgs) -> Result<()> {
                     .get("program")
                     .or_else(|| receipt.get("contract"))
                     .and_then(Value::as_str)
+                    .filter(|address| !address.is_empty())
                     .map(str::to_string);
+                if resolved_address.is_none() {
+                    return Err(anyhow!(
+                        "successful deploy receipt lacks the actual program address: {receipt}"
+                    ));
+                }
                 if let Some(actual) = &resolved_address {
                     if actual != &address {
                         receipt_note = format!(
@@ -228,7 +244,7 @@ pub fn run(args: &CreateArgs) -> Result<()> {
                 }
             }
             Err(e) => {
-                receipt_note = format!("could not confirm via receipt: {e}");
+                return Err(anyhow!("deploy tx {tx_hash} staged but unconfirmed: {e}; check this hash before resubmitting"));
             }
         }
     }
@@ -262,7 +278,10 @@ fn wait_for_receipt(
                 return rpc_client::call(endpoint, "contract_receipt", json!([tx_hash]));
             }
             Some(s @ ("rejected" | "dropped")) => {
-                let reason = st.get("reason").and_then(Value::as_str).unwrap_or("unspecified");
+                let reason = st
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unspecified");
                 return Err(anyhow!("deploy tx {tx_hash} {s}: {reason}"));
             }
             _ => {}

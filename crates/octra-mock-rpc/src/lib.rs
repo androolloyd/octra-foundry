@@ -377,7 +377,7 @@ pub struct ChainState {
     /// Permanent slashed flag — once set, that address can never
     /// re-register or re-bond.
     pub endpoint_slashed: HashSet<String>,
-    /// Program treasury (Tier 2 protocol fee + burn share of slashes).
+    /// Program treasury (retained share of slashes; traffic has no commission).
     pub program_treasury: u64,
     /// Tailnets keyed by their counter id (string-encoded for
     /// JSON-RPC convenience; value parses as u64).
@@ -540,7 +540,7 @@ pub const MIN_ENDPOINT_STAKE: u64 = 1_000_000_000;
 pub const UNBOND_GRACE_EPOCHS: u64 = 10_000;
 pub const SLASH_BURN_BPS: u64 = 9_000;
 pub const SLASH_BOUNTY_BPS: u64 = 1_000;
-pub const PROTOCOL_FEE_BPS: u64 = 50;
+pub const PROTOCOL_FEE_BPS: u64 = 0;
 
 #[derive(Clone)]
 pub struct EndpointRow {
@@ -2519,11 +2519,7 @@ fn apply_settle_confirm(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Va
     if total_paid > deposit {
         return Err("claim exceeds escrow".into());
     }
-    let protocol_fee = total_paid
-        .checked_mul(PROTOCOL_FEE_BPS)
-        .ok_or("overflow fee")?
-        / 10_000;
-    let net_pay = total_paid - protocol_fee;
+    let net_pay = total_paid;
     let refund = deposit - total_paid;
 
     if let Some(sess) = s.sessions.get_mut(&sid) {
@@ -2535,12 +2531,6 @@ fn apply_settle_confirm(app: &AppState, tx: &Value, from: &str) -> Result<Vec<Va
     }
     if let Some(ep) = s.endpoints.get_mut(&exit) {
         ep.reputation += 1;
-    }
-    if protocol_fee > 0 {
-        s.program_treasury = s
-            .program_treasury
-            .checked_add(protocol_fee)
-            .ok_or("overflow treasury")?;
     }
     if refund > 0 {
         if let Some(t) = s.tailnets.get_mut(&tid) {
@@ -3099,11 +3089,7 @@ fn apply_settle_confirm_v2(app: &AppState, tx: &Value, from: &str) -> Result<Vec
     if total_paid > deposit {
         return Err("claim exceeds escrow".into());
     }
-    let protocol_fee = total_paid
-        .checked_mul(PROTOCOL_FEE_BPS)
-        .ok_or("overflow fee")?
-        / 10_000;
-    let net_pay = total_paid - protocol_fee;
+    let net_pay = total_paid;
     let refund = deposit - total_paid;
 
     if let Some(sess) = s.sessions_v2.get_mut(&sid) {
@@ -3113,12 +3099,6 @@ fn apply_settle_confirm_v2(app: &AppState, tx: &Value, from: &str) -> Result<Vec
     if net_pay > 0 && s.proxy_pk_set_v2.get(&proxy).copied().unwrap_or(false) {
         // Mirrors v1's `enc_earnings += net_pay`. Mock-cleartext.
         *s.enc_earnings_v2.entry(proxy.clone()).or_insert(0) += net_pay;
-    }
-    if protocol_fee > 0 {
-        s.program_treasury = s
-            .program_treasury
-            .checked_add(protocol_fee)
-            .ok_or("overflow treasury")?;
     }
     if refund > 0 {
         if let Some(t) = s.tailnets.get_mut(&tid) {

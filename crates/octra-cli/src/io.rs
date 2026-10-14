@@ -67,6 +67,20 @@ pub fn current_timestamp() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+        .map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// Native signatures by default. The caller must reject a model chain ID before
+/// HTTP submission; only explicit in-process fixtures can use that extension.
+pub fn sign_call(key: &octra_core::KeyPair, call: Value) -> Result<Value> {
+    if call
+        .get("chain_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+    {
+        octra_core::tx::sign_call(key, call).map_err(|error| anyhow!("sign model call: {error}"))
+    } else {
+        octra_core::native_tx::sign_call_canonical(key, &call)
+            .map_err(|error| anyhow!("sign native call: {error}"))
+    }
 }

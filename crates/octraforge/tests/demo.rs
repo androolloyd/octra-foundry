@@ -123,7 +123,7 @@ octra_test!(full_lifecycle_endpoint_tailnet_session_claim, |forge| {
     );
 
     // 7. Client confirms matching bytes; this is what actually applies
-    //    the settlement. bytes_used=2 → gross=200, fee=1, net=199,
+    //    the settlement. bytes_used=2 → gross=200, fee=0, net=200,
     //    refund=800.
     forge.prank(CLIENT);
     let settled = forge.call_settle_confirm(sid, 2).expect("settle_confirm");
@@ -138,16 +138,17 @@ octra_test!(full_lifecycle_endpoint_tailnet_session_claim, |forge| {
         Some(1800)
     );
 
-    // 8. Program treasury collected the 0.5 % protocol fee = 1 OU.
+    // 8. Traffic pays the operator in full; no protocol commission is retained.
     let pt = forge.view("get_program_treasury", vec![]).unwrap();
-    assert_eq!(pt.as_u64(), Some(200 * PROTOCOL_FEE_BPS / 10_000));
+    assert_eq!(PROTOCOL_FEE_BPS, 0);
+    assert_eq!(pt.as_u64(), Some(0));
 
-    // 9. Validator claims the post-fee 199 OU. The mock simplifies the
+    // 9. Validator claims the full 200 OU. The mock simplifies the
     //    HFHE zero-proof to a direct equality check; the "proof" is
     //    any non-empty byte string.
     forge.prank(VALIDATOR);
     let claimed = forge
-        .call_claim_earnings(199, &"00".repeat(32))
+        .call_claim_earnings(200, &"00".repeat(32))
         .expect("claim earnings");
     assert!(claimed.find_event("EarningsClaimed").is_some());
 

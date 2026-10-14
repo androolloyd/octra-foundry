@@ -20,6 +20,7 @@
 pub mod address;
 pub mod circle;
 pub mod coverage;
+pub mod native_tx;
 pub mod sig;
 pub mod tx;
 pub mod util;

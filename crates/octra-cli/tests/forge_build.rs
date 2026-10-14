@@ -40,7 +40,7 @@ fn build_offline_against_program_dir() {
     fs::write(prog_dir.path().join("main.aml"), OCTRAVPN_LIKE_AML).unwrap();
     let dir = tempdir().unwrap();
     cmd()
-        .args(["forge", "build", "--offline", "--root"])
+        .args(["forge", "build", "--mock", "--root"])
         .arg(prog_dir.path())
         .arg("--out")
         .arg(dir.path())
@@ -78,7 +78,7 @@ fn build_offline_synthetic_aml_file() {
     )
     .unwrap();
     cmd()
-        .args(["forge", "build", "--offline", "--root"])
+        .args(["forge", "build", "--mock", "--root"])
         .arg(src_dir.path())
         .arg("--out")
         .arg(out_dir.path())
@@ -93,4 +93,47 @@ fn build_offline_synthetic_aml_file() {
         .unwrap()
         .iter()
         .any(|m| m["name"] == "foo"));
+}
+
+#[test]
+fn real_build_missing_compiler_never_emits_synthetic_artifacts() {
+    let source = tempdir().unwrap();
+    let out = tempdir().unwrap();
+    fs::write(
+        source.path().join("main.aml"),
+        "contract Real { fn ping(): bool { return true } }",
+    )
+    .unwrap();
+    cmd()
+        .args(["forge", "build", "--root"])
+        .arg(source.path())
+        .arg("--out")
+        .arg(out.path())
+        .arg("--amlc")
+        .arg(source.path().join("absent-amlc"))
+        .assert()
+        .failure()
+        .stderr(contains("install the pinned amlc"));
+    assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn rpc_compile_failure_never_falls_back_to_synthetic_artifacts() {
+    let source = tempdir().unwrap();
+    let out = tempdir().unwrap();
+    fs::write(
+        source.path().join("main.aml"),
+        "contract Real { fn ping(): bool { return true } }",
+    )
+    .unwrap();
+    cmd()
+        .args(["forge", "build", "--root"])
+        .arg(source.path())
+        .arg("--out")
+        .arg(out.path())
+        .args(["--rpc-url", "http://127.0.0.1:1/rpc"])
+        .assert()
+        .failure()
+        .stderr(contains("compile main.aml"));
+    assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
 }

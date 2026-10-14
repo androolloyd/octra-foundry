@@ -138,6 +138,17 @@ pub fn canonical_payload_json(payload: &CircleDeployPayload) -> String {
     serde_json::to_string(payload).expect("payload serializable")
 }
 
+/// Validate the native Circle identifier shape. Unlike padded wallet addresses,
+/// cycled Circle IDs need not decode to a 32-byte digest.
+pub fn valid_circle_id(circle: &str) -> bool {
+    circle.strip_prefix("oct").is_some_and(|body| {
+        body.len() == 44
+            && body
+                .bytes()
+                .all(|b| b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".contains(&b))
+    })
+}
+
 /// Predict the circle id from `(deployer, nonce, payload)`. Match
 /// the reference JS `circleIdOfDeploy` byte-for-byte: returns an
 /// `oct…` string padded/cycled to 47 chars total ("oct" + 44 base58).
@@ -222,7 +233,7 @@ impl PaddingClass {
 
 /// Frame the plaintext with a u32be length prefix, then pad to the
 /// requested class with random bytes. Matches webcli `paddedFrame`.
-fn padded_frame(plaintext: &[u8], padding: PaddingClass) -> Vec<u8> {
+pub(crate) fn padded_frame(plaintext: &[u8], padding: PaddingClass) -> Vec<u8> {
     let mut bare = Vec::with_capacity(4 + plaintext.len());
     let len = u32::try_from(plaintext.len()).expect("plaintext < 4 GiB");
     bare.extend_from_slice(&len.to_be_bytes());

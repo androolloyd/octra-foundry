@@ -18,10 +18,14 @@ pub struct BuildArgs {
     /// Output dir (defaults to `out/`).
     #[arg(long, default_value = "out")]
     pub out: PathBuf,
-    /// Skip the RPC compile and use the deterministic offline stub
-    /// compiler. Always implied when `--rpc-url` is unset.
+    /// Use the local real compiler instead of RPC.
     #[arg(long)]
     pub offline: bool,
+    /// Explicit synthetic fixtures for tooling tests. Never deployable.
+    #[arg(long, conflicts_with = "rpc_url")]
+    pub mock: bool,
+    #[arg(long, env = "AMLC", default_value = "amlc")]
+    pub amlc: PathBuf,
     /// RPC URL to use for `octra_compileAmlMulti`.
     #[arg(long, env = "OCTRA_RPC_URL")]
     pub rpc_url: Option<String>,
@@ -39,14 +43,22 @@ pub fn run(args: &BuildArgs) -> Result<()> {
         .iter()
         .map(|(rel, src)| (rel.clone(), Value::String(src.clone())))
         .collect::<serde_json::Map<_, _>>();
-    let compiled = if args.offline || args.rpc_url.is_none() {
+    let compiled = if args.mock {
         compile_offline(&multi_in)
-    } else {
+    } else if !args.offline && args.rpc_url.is_some() {
         let endpoint = rpc_client::endpoint_from_url(args.rpc_url.as_deref().unwrap_or(""));
-        compile_rpc(&endpoint, &files).unwrap_or_else(|e| {
-            tracing::warn!("rpc compile failed ({e}); falling back to offline stub");
-            compile_offline(&multi_in)
-        })
+        compile_rpc(&endpoint, &files)?
+    } else {
+        let mut out = serde_json::Map::new();
+        for (path, _) in &files {
+            let artifact = super::amlc::compile(&args.amlc, &args.root.join(path))?;
+            let name = artifact["name"].as_str().context("compiled name absent")?;
+            if out.contains_key(name) {
+                anyhow::bail!("duplicate contract name: {name}");
+            }
+            out.insert(name.to_owned(), artifact);
+        }
+        Value::Object(out)
     };
     let map = compiled
         .as_object()
@@ -57,6 +69,11 @@ pub fn run(args: &BuildArgs) -> Result<()> {
         let name = artifact["name"]
             .as_str()
             .map_or_else(|| path.clone(), str::to_string);
+        super::amlc::validate_name(&name)?;
+        if artifact["bytecode"].as_str().map_or(true, str::is_empty) {
+            anyhow::bail!("compiler returned no bytecode for {name}");
+        }
+        super::amlc::functions(&artifact["abi"])?;
         write_artifact(&args.out, &name, artifact)?;
         // Surface the compiler's diagnostics + (upcoming) formal-
         // verification audit straight from the compile response. Against
@@ -98,7 +115,10 @@ fn compile_rpc(endpoint: &rpc_client::Endpoint, files: &[(String, String)]) -> R
             .and_then(|v| v.get("program_name"))
             .and_then(Value::as_str)
             .map_or_else(|| compile::infer_program_name(path, source), str::to_string);
-        out.insert(name, artifact);
+        super::amlc::validate_name(&name)?;
+        if out.insert(name.clone(), artifact).is_some() {
+            anyhow::bail!("duplicate contract name: {name}");
+        }
     }
     Ok(Value::Object(out))
 }
@@ -108,40 +128,27 @@ fn compile_offline(files: &serde_json::Map<String, Value>) -> Value {
     for (path, src) in files {
         let source = src.as_str().unwrap_or_default();
         let name = compile::infer_program_name(path, source);
-        out.insert(path.clone(), compile::synthesize_artifact(&name, source));
+        let mut artifact = compile::synthesize_artifact(&name, source);
+        artifact["deployable"] = json!(false);
+        artifact["compiler_backend"] = json!("synthetic-mock");
+        out.insert(path.clone(), artifact);
     }
     Value::Object(out)
 }
 
 fn discover_aml(root: &Path) -> Result<Vec<(String, String)>> {
-    let mut out = Vec::new();
-    walk_dir(root, root, &mut out)?;
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
-}
-
-fn walk_dir(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
-    let rd = std::fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))?;
-    for entry in rd {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            walk_dir(root, &path, out)?;
-        } else if path.extension().and_then(|s| s.to_str()) == Some("aml") {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .into_owned();
-            let body = std::fs::read_to_string(&path)
-                .with_context(|| format!("read {}", path.display()))?;
-            out.push((rel, body));
-        }
-    }
-    Ok(())
+    super::amlc::discover(root, false)?
+        .into_iter()
+        .map(|path| {
+            let rel = path.strip_prefix(root)?.to_string_lossy().into_owned();
+            let body = std::fs::read_to_string(&path)?;
+            Ok((rel, body))
+        })
+        .collect()
 }
 
 pub fn write_artifact(out_dir: &Path, name: &str, artifact: &Value) -> Result<()> {
+    super::amlc::validate_name(name)?;
     let json_path = out_dir.join(format!("{name}.json"));
     write_to(
         &json_path,

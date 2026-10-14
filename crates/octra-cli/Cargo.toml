@@ -16,6 +16,7 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
+tempfile = { workspace = true }
 octra-core         = { workspace = true }
 octra-mock-rpc     = { workspace = true }
 octraforge         = { workspace = true }

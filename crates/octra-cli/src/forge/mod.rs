@@ -1,11 +1,9 @@
 //! `octra forge` — build / deploy / test / snapshot / bind.
 //!
-//! These mirror Foundry's `forge` subcommands. The build pipeline goes
-//! through `octra_compileAml` / `octra_compileAmlMulti` when an RPC URL
-//! is provided; in offline mode (`--offline` or no URL set) we use the
-//! same deterministic stub compiler used by the in-process mock so the
-//! tool always produces *some* artifact for downstream commands.
+//! Local builds/tests execute the configured real `amlc`; RPC builds fail closed.
+//! Synthetic artifacts are available only through explicit `--mock` builds.
 
+pub mod amlc;
 pub mod bind;
 pub mod build;
 pub mod compile;
@@ -31,7 +29,7 @@ pub enum ForgeCmd {
     Inspect(inspect::InspectArgs),
     /// Generate typed Rust stubs from a compiled ABI.
     Bind(bind::BindArgs),
-    /// Run `cargo test -p octraforge` with Foundry-style output.
+    /// Execute AML `test_*` methods; use --package for Rust tests.
     Test(test_cmd::TestArgs),
     /// Capture per-test OU costs to `.gas-snapshot` and diff on rerun.
     Snapshot(snapshot::SnapshotArgs),

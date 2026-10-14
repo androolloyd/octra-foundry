@@ -27,7 +27,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use clap::Args;
 use serde_json::Value;
 
@@ -47,13 +47,7 @@ pub fn run(args: &BindArgs) -> Result<()> {
     let raw = std::fs::read_to_string(&args.abi)
         .with_context(|| format!("read {}", args.abi.display()))?;
     let v: Value = serde_json::from_str(&raw)?;
-    let abi: Vec<Value> = if let Some(a) = v.as_array() {
-        a.clone()
-    } else if let Some(a) = v.get("abi").and_then(|x| x.as_array()) {
-        a.clone()
-    } else {
-        return Err(anyhow!("ABI file must be an array or `{{abi: []}}`"));
-    };
+    let abi = super::amlc::functions(&v)?;
     let program_name = v
         .get("name")
         .and_then(|x| x.as_str())

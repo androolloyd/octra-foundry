@@ -7,6 +7,7 @@
 
 pub mod abi;
 pub mod circle;
+mod circle_call;
 pub mod hash;
 pub mod pvac;
 pub mod tx;
@@ -54,11 +55,8 @@ pub enum CastCmd {
         key: Option<std::path::PathBuf>,
         #[arg(long, env = "OCTRA_RPC_URL", default_value = DEFAULT_RPC_URL)]
         rpc_url: String,
-        /// v2 chain-id binding (P1-5b). When set, the tx envelope's
-        /// canonical bytes include `chain_id`, binding the signature
-        /// to a specific network. Omit (or leave empty) for v1
-        /// (wallet-compat) signing. Mainnet operators should pass
-        /// `octra-mainnet`; devnet, `octra-devnet`.
+        /// Model-only signing domain for explicit in-process fixtures.
+        /// Native Octra does not sign this field; HTTP submission rejects it.
         #[arg(long, env = "OCTRA_CHAIN_ID")]
         chain_id: Option<String>,
     },
@@ -108,7 +106,7 @@ pub enum CastCmd {
         /// Optional message attached to the tx.
         #[arg(long)]
         message: Option<String>,
-        /// v2 chain-id binding (P1-5b). See `Send::chain_id`.
+        /// Model-only signing domain. Unsupported for native HTTP submission.
         #[arg(long, env = "OCTRA_CHAIN_ID")]
         chain_id: Option<String>,
     },
@@ -203,6 +201,15 @@ pub fn dispatch(cmd: CastCmd) -> Result<()> {
     }
 }
 
+fn reject_native_chain_id(endpoint: &rpc_client::Endpoint, chain_id: Option<&str>) -> Result<()> {
+    if chain_id.is_some_and(|id| !id.is_empty())
+        && !matches!(endpoint, rpc_client::Endpoint::InProcess(_))
+    {
+        anyhow::bail!("Octra does not sign a chain_id envelope field; --chain-id is only supported by explicit in-process model fixtures");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cast_transfer(
     to: &str,
@@ -220,6 +227,7 @@ fn cast_transfer(
         .display()
         .to_string();
     let endpoint = rpc_client::endpoint_from_url(rpc_url);
+    reject_native_chain_id(&endpoint, chain_id)?;
     let actual_nonce = if let Some(n) = nonce {
         n
     } else {
@@ -231,7 +239,10 @@ fn cast_transfer(
         // so two transfers in a row collided: the second reused the
         // first's nonce and the node refused it with
         // 105 "duplicate nonce (fee rate bump < 10%)".
-        let committed = bal.get("nonce").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let committed = bal
+            .get("nonce")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         let pending = bal
             .get("pending_nonce")
             .and_then(serde_json::Value::as_u64)
@@ -261,9 +272,9 @@ fn cast_transfer(
             .unwrap()
             .insert("chain_id".into(), json!(cid));
     }
-    let signed = octra_core::tx::sign_call(&kp, tx).map_err(|e| anyhow!("sign_call: {e}"))?;
+    let signed = crate::io::sign_call(&kp, tx).map_err(|e| anyhow!("sign_call: {e}"))?;
     let result = rpc_client::call(&endpoint, "octra_submit", json!([signed]))?;
-    println!("transfer from: {from}");
+    eprintln!("transfer from: {from}");
     cio::dump_json(&result);
     Ok(())
 }
@@ -301,6 +312,7 @@ fn cast_send(
 ) -> Result<()> {
     let parsed: Vec<Value> = args.iter().map(|a| cio::parse_arg_token(a)).collect();
     let endpoint = rpc_client::endpoint_from_url(rpc_url);
+    reject_native_chain_id(&endpoint, chain_id)?;
     // Auto-fetch nonce if not supplied + we have a key (so we know
     // whose nonce to read). Falls back to 0 when neither key nor
     // explicit nonce is provided — useful for mock chains that
@@ -314,10 +326,24 @@ fn cast_send(
                 let addr = octra_core::address::Address::from_pubkey(&kp.public.0)
                     .display()
                     .to_string();
-                rpc_client::call(&endpoint, "octra_balance", json!([&addr]))
-                    .ok()
-                    .and_then(|v| v.get("nonce").and_then(serde_json::Value::as_u64))
-                    .map_or(1, |n| n + 1)
+                match rpc_client::call(&endpoint, "octra_balance", json!([&addr])) {
+                    Ok(balance) => {
+                        let confirmed = balance
+                            .get("nonce")
+                            .and_then(Value::as_u64)
+                            .context("balance response missing nonce")?;
+                        let pending = balance
+                            .get("pending_nonce")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(confirmed);
+                        confirmed
+                            .max(pending)
+                            .checked_add(1)
+                            .context("nonce exhausted")?
+                    }
+                    Err(_) if matches!(endpoint, rpc_client::Endpoint::InProcess(_)) => 1,
+                    Err(error) => return Err(error).context("fetch balance for nonce"),
+                }
             } else {
                 0
             }
@@ -335,7 +361,7 @@ fn cast_send(
         chain_id,
     )?;
     let result = rpc_client::call(&endpoint, "octra_submit", json!([signed]))?;
-    println!("submitted from: {from_str}");
+    eprintln!("submitted from: {from_str}");
     cio::dump_json(&result);
     Ok(())
 }
@@ -379,7 +405,7 @@ fn build_envelope(
         if let Some(obj) = call.as_object_mut() {
             obj.insert("from".into(), json!(from_value));
         }
-        let signed = octra_core::tx::sign_call(&kp, call).map_err(|e| anyhow!("sign_call: {e}"))?;
+        let signed = crate::io::sign_call(&kp, call).map_err(|e| anyhow!("sign_call: {e}"))?;
         Ok((from_value, signed))
     } else {
         let from_value = from

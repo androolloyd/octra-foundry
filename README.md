@@ -70,6 +70,22 @@ cargo build --workspace
 cargo test  --workspace
 ```
 
+## AML and native signing
+
+Set `AMLC` to the pinned real compiler. `octra forge test --root test`
+executes zero-argument `test_*` AML methods in isolated VM state; add
+`--contract program.aml` to append test fragments to the production source.
+`// expect-revert test_name "reason"` requires that exact VM revert.
+False boolean results, compiler failures, and empty selections fail the run.
+Rust tests remain available through `forge test --package <crate>`.
+
+Local builds use the real compiler; `--mock` is required for synthetic artifacts.
+RPC compilation fails closed. Deployment waits require a successful receipt and
+an actual program address; `--no-wait` reports an unconfirmed prediction.
+Wallet commands use `octra_core::native_tx`, also re-exported by the chain adapter.
+The older `tx` signing domain remains available for explicit model fixtures.
+Traffic settlement in the VPN mock pays the operator in full with zero commission.
+
 ## Status
 
 Pre-1.0. The cheatcode and assertion surface is still evolving in

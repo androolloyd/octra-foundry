@@ -49,7 +49,7 @@ fn bind_generates_compileable_file() {
     fs::write(prog_root.path().join("main.aml"), FIXTURE_AML).unwrap();
     let build_out = tempdir().unwrap();
     cmd()
-        .args(["forge", "build", "--offline", "--root"])
+        .args(["forge", "build", "--mock", "--root"])
         .arg(prog_root.path())
         .arg("--out")
         .arg(build_out.path())
