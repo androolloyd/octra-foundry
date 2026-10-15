@@ -53,15 +53,16 @@ curl -s -X POST -H 'Content-Type: application/json' \
 The first build compiles OCaml 4.14.2 plus the 115 locked opam deps —
 roughly 15 minutes on an M-series laptop, up to an hour on slower
 machines; config-only changes reuse those layers. The chain id is
-`octra-foundry-local` and the RPC binds loopback only — the dev keys
+`octra-local-foundry` and the RPC binds loopback only — the dev keys
 are public, so this stack must never be pointed at a real network.
 
-The image is pinned to lite_node `dd342e754c91df55a41b515c510369d637af2385`
-(devnet release sequence 2). Sequence 4 (`f3b6d58`, 2026-08-22) did not
-change the RPC surface (still 212 names), the signing preimage, or
-`runtime_profile_hash`, so this pin is still a valid Single-mode VM.
-Bump `SOURCE_COMMIT` in the Dockerfile and re-run `tools/rpc-scrape`
-when a release actually moves the RPC or the runtime profile.
+The image and generated RPC registry pin lite_node
+`7f9be4489870645cfcc95439638cde40f5da9f50` (214 names, 138 primaries and
+76 aliases). The private startup opt-in and canonical staging-order regression
+are documented in [`LOCAL_TEST_MODE.md`](docker/octra-node/LOCAL_TEST_MODE.md).
+This local fixture does not qualify a public chain's activated execution profile.
+When updating the node pin, regenerate the registry with `tools/rpc-scrape`
+and rerun the native startup, staging and backend tests.
 
 ## Usage
 

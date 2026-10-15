@@ -86,7 +86,7 @@ pub fn run(args: &TestArgs) -> Result<()> {
             {
                 continue;
             }
-            if method["inputs"].as_array().map_or(true, |a| !a.is_empty()) {
+            if method["inputs"].as_array().is_none_or(|a| !a.is_empty()) {
                 bail!("{name} must have zero arguments");
             }
             let output = amlc::execute(

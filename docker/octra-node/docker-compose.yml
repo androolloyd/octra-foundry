@@ -28,13 +28,14 @@ services:
         # (not the in-tree SOURCE_COMMIT release-marker file). Upstream
         # cuts epoch-gated releases weekly; bump deliberately, never
         # track main.
-        SOURCE_COMMIT: 9e7ee19af38ba020497566ac73c268f42b20b9a4
-    image: octra-node:9e7ee19a
+        SOURCE_COMMIT: 7f9be4489870645cfcc95439638cde40f5da9f50
+    image: octra-node:7f9be448-local-test
     environment:
       # Private chain id — anything but devnet's
       # "octra-devnet-9871-cluster", so txs/state can never be confused
       # with a real network.
-      OCTRA_CHAIN_ID: octra-foundry-local
+      OCTRA_CHAIN_ID: octra-local-foundry
+      OCTRA_LOCAL_TEST_MODE: "1"
       OCTRA_DATA_DIR: /octra/data
       OCTRA_VALIDATORS: "oct1fKQS6gwqbVUFnzMSVsNRcY7aeJE5Kt84uq55mLAsH3r:DcVw9lEfzSxuM9V1ROmKJQq6Mybz0BG/9XImA4kfQDI=,oct21vtY7jGprbS5gzL7Crxu22GJhXVQwCzfNmBCgGHvC72:sp+3RZzqiSbuv2Gd2ptqPF8BGjaiEfF65apMtp3EtKs=,octEfyBH8nq6YbVspRYhCnWXsbM7UopJt1rk3DixJggb8GP:5dL/EPzRpxS/Xr4aiRNZNN5i8KNa+F0GX3jje5ddoyI=,octH4AFtmpTmezJKxKCZ4wUHjDVS78vEXpmkjLg1DzmQ8dq:k3FwmGXi3I5z3rU9m28QkZWkPuZLymdU2WnlS0rE4BY=,oct7TMi64mtRYXZ7jQPdTUbAc7774KsXykHTVuMsSSch1zJ:2UKljDakccgg3togUKo9WXD6pjhTYbkXB5+iMo1m7iY=,oct78d9RxFufJHD6RonAT5JWY5zUogAhLh7xa9oHWJW9CkY:XSDVYtk2PHDnHZPt44LH1wf6BYxLjhsff/Zzi0Kdrwk=,octEgfmbNJoXnBqQ3KcL5JXMvjd77Nk1wsKPCnh1hBiaF5j:n5md3kYgSyNiqY2EVZg2WNO8nF5QWQ8h/7lBwFNunMQ=,octGn5wKZR1Wfh7A2nA7UC3znixUogy8TwcHMCX4erHzDBc:sCpf47ysXojA+5h0DBxLe4pej5JuvkXmdRvTt6RysA4=,octDsU65W5JygSZFhU8UGnkfAz9rQJXs5natsTC9VALteta:SFFVIRkROp5zGzDrvuW3mpc080Li+YhOitp6BSPh/kE=,octFDqPsZkAirxQ87fm3bkiZpA8fXASAMZnRe8dBbHrRjfJ:xJmAZYZA7zICQC4Xx3Q2qIHUjNTbUhRWTL5U0JkLvpk="
       # Devkey 0 as the node's own wallet identity, written by the

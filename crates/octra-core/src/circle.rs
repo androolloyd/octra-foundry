@@ -626,7 +626,7 @@ mod tests {
                 prop_assert_eq!(out.len(), 4 + plaintext.len());
             } else {
                 // Aligned to target.
-                prop_assert!(out.len() % target == 0 || out.len() == 4 + plaintext.len());
+                prop_assert!(out.len().is_multiple_of(target) || out.len() == 4 + plaintext.len());
             }
             // The length prefix is the real plaintext length.
             let len = u32::from_be_bytes(out[..4].try_into().unwrap()) as usize;

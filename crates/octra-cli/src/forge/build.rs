@@ -70,7 +70,7 @@ pub fn run(args: &BuildArgs) -> Result<()> {
             .as_str()
             .map_or_else(|| path.clone(), str::to_string);
         super::amlc::validate_name(&name)?;
-        if artifact["bytecode"].as_str().map_or(true, str::is_empty) {
+        if artifact["bytecode"].as_str().is_none_or(str::is_empty) {
             anyhow::bail!("compiler returned no bytecode for {name}");
         }
         super::amlc::functions(&artifact["abi"])?;

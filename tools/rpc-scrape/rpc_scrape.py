@@ -54,7 +54,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Upstream source map. Line numbers are documentation only (they drift); the
 # extractors locate bindings by name. Every entry was hand-verified against
-# lite_node @ dd342e754c91df55a41b515c510369d637af2385.
+# lite_node @ 7f9be4489870645cfcc95439638cde40f5da9f50.
 # ---------------------------------------------------------------------------
 
 
@@ -137,8 +137,8 @@ MIN_ERROR_CONSTANTS = 18
 
 # Pinned totals. A change here is a real upstream API change and must be
 # reviewed, not rubber-stamped. Bump only with --accept-count-change.
-EXPECTED_TOTAL_NAMES = 212
-EXPECTED_TOTAL_PRIMARIES = 136
+EXPECTED_TOTAL_NAMES = 214
+EXPECTED_TOTAL_PRIMARIES = 138
 
 
 class ScrapeError(RuntimeError):
@@ -359,6 +359,11 @@ def check_composition(upstream: Path) -> None:
     path = upstream / "node_runtime/node_rpc_server.ml"
     text = strip_comments(path.read_text(encoding="utf-8", errors="replace"))
     body = binding_body(text, "dispatch", where="node_rpc_server.ml::dispatch")
+    if re.search(r"\bread_dispatch\b", body):
+        reads = binding_body(text, "read_dispatch", where="node_rpc_server.ml::read_dispatch")
+        if "|> guard_reads visibility" not in reads:
+            raise die("read_dispatch no longer applies the reviewed visibility guard")
+        body = body + "\n" + reads
     missing = [g for g in EXPECTED_COMPOSITION if g not in body]
     if missing:
         raise die(
@@ -376,6 +381,7 @@ def check_composition(upstream: Path) -> None:
         )
     )
     seen.discard("dispatch")
+    seen.discard("read_dispatch")
     unknown = sorted(t for t in seen if t not in EXPECTED_COMPOSITION)
     if unknown:
         raise die(

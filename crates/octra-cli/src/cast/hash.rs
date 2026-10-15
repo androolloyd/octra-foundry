@@ -21,7 +21,7 @@ fn decode_input(s: &str) -> Vec<u8> {
     if stripped.is_empty() {
         return Vec::new();
     }
-    if stripped.len() % 2 == 0 && stripped.chars().all(|c| c.is_ascii_hexdigit()) {
+    if stripped.len().is_multiple_of(2) && stripped.chars().all(|c| c.is_ascii_hexdigit()) {
         return hex::decode(stripped).unwrap_or_default();
     }
     s.as_bytes().to_vec()

@@ -291,7 +291,7 @@ pub fn render_compile(r: &CompileReport) -> bool {
         (Some(s), Some(i)) => println!("  ✓ {} compiled ({v}, {i} instrs, {s} bytes)", r.program),
         _ => println!("  ✓ {} compiled ({v})", r.program),
     }
-    r.formal_verification.as_ref().map_or(true, render_fv)
+    r.formal_verification.as_ref().is_none_or(render_fv)
 }
 
 /// Render a verify report. Returns `false` on failed verification or FV
@@ -307,7 +307,7 @@ pub fn render_verify(r: &VerifyReport) -> bool {
     } else {
         println!("  ✗ {} source NOT verified", r.address);
     }
-    let fv_ok = r.formal_verification.as_ref().map_or(true, render_fv);
+    let fv_ok = r.formal_verification.as_ref().is_none_or(render_fv);
     r.verified && fv_ok
 }
 

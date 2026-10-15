@@ -26,7 +26,7 @@ opinion. A method the mock can answer is now either in the generated
 ## Upstream sources
 
 Everything is reachable from `node_rpc_server.ml::dispatch`, which concatenates
-exactly twelve route groups. The tool asserts that composition, so a *new*
+the read groups (guarded by visibility) plus effect and compute route groups. The tool asserts that composition, so a *new*
 upstream group cannot slip past unnoticed.
 
 | Group | File | Binding | Shape |
@@ -46,7 +46,7 @@ Error constants come from `lib/core/rpc.ml`, region `let parse_error` ..
 `let response_json`.
 
 `route_aliases "primary" "alias" handler` registers **both** names against one
-handler, so both are live methods. Hence 136 primaries but 212 dispatchable
+handler, so both are live methods. Hence 138 primaries but 214 dispatchable
 names.
 
 ## The loud-failure contract
@@ -100,5 +100,9 @@ git HEAD for non-git checkouts.
 weekly, so this pin is perishable by design — bumping the node image and
 forgetting to re-scrape is exactly the drift this tool exists to surface.
 
-Current pin: `dd342e754c91df55a41b515c510369d637af2385`
-(212 dispatchable names, 136 primaries, 76 aliases, 20 error constants).
+Current pin: `7f9be4489870645cfcc95439638cde40f5da9f50`
+(214 dispatchable names, 138 primaries, 76 aliases, 20 error constants).
+The two added primaries since `dd342e754c91df55a41b515c510369d637af2385`
+are `octra_epochPage` and `octra_validatorEnrollment`. The scraper requires the
+reviewed visibility guard when upstream composes routes through `read_dispatch`.
+The generated registry and Docker source pin use the same commit.

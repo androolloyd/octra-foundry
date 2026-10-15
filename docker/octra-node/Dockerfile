@@ -20,7 +20,7 @@
 # NOTE: this is a GIT sha of octra-labs/lite_node. It is NOT the value
 # of the in-tree SOURCE_COMMIT file — that file is upstream's release
 # marker and does not resolve as a git ref.
-ARG SOURCE_COMMIT=dd342e754c91df55a41b515c510369d637af2385
+ARG SOURCE_COMMIT=7f9be4489870645cfcc95439638cde40f5da9f50
 
 # --- source: pin the upstream tree ------------------------------------
 # A separate minimal stage so the (cheap) clone re-runs on commit bumps
@@ -85,14 +85,38 @@ RUN opam update \
 # optional: the node refuses to start without it as a sibling
 # (bin/octra_node.ml:87-95, lib/core/pvac_verify_worker.ml:85-93).
 COPY --from=source --chown=opam:opam /src/ ./
+# Latest pinned Circle host uses Option::is_none_or (stable in 1.82).
+# Keep the opam dependency layer cached and upgrade only the Rust build tool.
+ARG CIRCLE_HOST_RUST_TOOLCHAIN=1.82.0
+RUN rustup toolchain install "$CIRCLE_HOST_RUST_TOOLCHAIN" --profile minimal \
+ && rustup default "$CIRCLE_HOST_RUST_TOOLCHAIN"
 # mcl's Makefile assumes obj/ and lib/ already exist; upstream's config
 # tooling pre-creates them (controls/lib/validator_config.py:426-427),
 # so mirror that here.
 RUN mkdir -p mcl/obj mcl/lib \
  && make -C mcl MCL_FP_BIT=256 MCL_FR_BIT=256 -j"$(nproc)" lib/libmcl.a
+# Local test opt-in only: private Single chains, no peer networking.
+# The upstream consensus engine, rule graph and execution profiles are unchanged.
+COPY --chown=opam:opam patches/local-test-mode.py /tmp/local-test-mode.py
+RUN python3 /tmp/local-test-mode.py
+# Regression reproduces the observed Single-mode refusal before the fix.
+# Existing canonical comparator and consensus validation remain unchanged.
+COPY --chown=opam:opam patches/staging-order.py /tmp/staging-order.py
+COPY --chown=opam:opam patches/test_local_staging_order.ml test/test_local_staging_order.ml
+RUN printf '\n(test (name test_local_staging_order) (modules test_local_staging_order) (libraries octra_node_runtime octra_core zarith))\n' >> test/dune \
+ && opam exec -- dune build --profile release test/test_local_staging_order.exe \
+ && (if opam exec -- dune exec --profile release test/test_local_staging_order.exe > /tmp/order-before.log 2>&1; then exit 1; fi) \
+ && grep -q 'single staging must be canonical' /tmp/order-before.log \
+ && python3 /tmp/staging-order.py \
+ && opam exec -- dune exec --profile release test/test_local_staging_order.exe
 RUN opam exec -- dune build --profile release \
       bin/octra_node.exe \
       bin/octra_pvac_worker.exe
+COPY --chown=opam:opam patches/test_local_startup.py /tmp/test_local_startup.py
+COPY --chown=opam:opam docker-compose.yml /tmp/local-test-compose.yml
+RUN --network=none python3 /tmp/test_local_startup.py --isolated-network-namespace \
+      --node /home/opam/build/_build/default/bin/octra_node.exe \
+      --compose /tmp/local-test-compose.yml
 
 # --- runtime: debian-slim + the four shared libs ----------------------
 # Runtime lib list from controls/install.sh:151 (ca-certificates for
