@@ -45,6 +45,12 @@ const DEFAULT_DEPLOY_OU: u64 = 50_000_000;
 pub struct CreateArgs {
     /// Source `.aml` file.
     pub file: PathBuf,
+    /// Reviewed compiled artifact. This route never calls a source compiler.
+    #[arg(long, requires = "artifact_sha256")]
+    pub compiled_artifact: Option<PathBuf>,
+    /// SHA256 of the exact reviewed artifact file (required with --compiled-artifact).
+    #[arg(long, requires = "compiled_artifact")]
+    pub artifact_sha256: Option<String>,
     /// Constructor args (parsed as JSON if possible). When supplied,
     /// rendered as a JSON-encoded `message` on the tx envelope.
     #[arg(long = "constructor-args", num_args = 0.., allow_hyphen_values = true)]
@@ -81,25 +87,39 @@ pub fn run(args: &CreateArgs) -> Result<()> {
     let endpoint = rpc_client::endpoint_from_url(&args.rpc_url);
     let is_mock = matches!(endpoint, rpc_client::Endpoint::InProcess(_));
 
-    // (1) Compile the AML source. Real Octra accepts the RPC; the
-    //     in-process mock provides the same shape via a stub.
-    // Params are `[source]` with an OPTIONAL second BOOLEAN (`program`),
-    // not `[source, name]` — contract_rpc.ml:342-357 rejects a string
-    // second param with "program must be boolean", and `true` demands
-    // program facts a plain contract compile does not carry. Passing the
-    // name here silently failed against every real node.
-    let compiled = rpc_client::call(&endpoint, "octra_compileAml", json!([source]));
-    // Only the in-process mock may synthesize an artifact. Against a real
-    // node a compile failure is fatal: the old blanket fallback produced a
-    // fake non-base64 bytecode that surfaced much later and far away, as
-    // `octra_computeContractAddress -> Invalid_argument("Wrong padding")`.
-    let artifact = match compiled {
-        Ok(a) => a,
-        Err(e) if is_mock => {
-            let _ = e;
-            compile::synthesize_artifact(&name, &source)
+    // Validate caller-pinned artifacts before reading a key or requesting a nonce.
+    // No compiler fallback is possible on this branch.
+    let artifact = match (&args.compiled_artifact, &args.artifact_sha256) {
+        (Some(path), Some(expected)) => {
+            super::artifact::load(path, expected, source.as_bytes(), &args.rpc_url)?
         }
-        Err(e) => return Err(anyhow!("octra_compileAml failed: {e}")),
+        (None, None) => {
+            // (1) Compile the AML source. Real Octra accepts the RPC; the
+            //     in-process mock provides the same shape via a stub.
+            // Params are `[source]` with an OPTIONAL second BOOLEAN (`program`),
+            // not `[source, name]` — contract_rpc.ml:342-357 rejects a string
+            // second param with "program must be boolean", and `true` demands
+            // program facts a plain contract compile does not carry. Passing the
+            // name here silently failed against every real node.
+            let compiled = rpc_client::call(&endpoint, "octra_compileAml", json!([source]));
+            // Only the in-process mock may synthesize an artifact. Against a real
+            // node a compile failure is fatal: the old blanket fallback produced a
+            // fake non-base64 bytecode that surfaced much later and far away, as
+            // `octra_computeContractAddress -> Invalid_argument("Wrong padding")`.
+            match compiled {
+                Ok(a) => a,
+                Err(e) if is_mock => {
+                    let _ = e;
+                    compile::synthesize_artifact(&name, &source)
+                }
+                Err(e) => return Err(anyhow!("octra_compileAml failed: {e}")),
+            }
+        }
+        _ => {
+            return Err(anyhow!(
+                "compiled artifact and SHA256 must be provided together"
+            ))
+        }
     };
     let bytecode = artifact["bytecode"]
         .as_str()

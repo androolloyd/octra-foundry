@@ -9,6 +9,9 @@ struct Cli {
     listen: SocketAddr,
     #[arg(long, default_value = "octPROGRAMaddress0000000000000000000000")]
     program_addr: String,
+    /// Seed an explicit mock account with OU, enabling real ledger admission.
+    #[arg(long, value_name = "ADDRESS=OU")]
+    fund: Vec<String>,
 }
 
 #[tokio::main]
@@ -19,5 +22,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let cli = Cli::parse();
-    octra_mock_rpc::serve(cli.listen, cli.program_addr).await
+    let accounts = cli
+        .fund
+        .iter()
+        .map(|value| {
+            let (address, amount) = value
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("--fund expects ADDRESS=OU"))?;
+            Ok((address.to_owned(), amount.parse::<u64>()?))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    octra_mock_rpc::serve_with_accounts(cli.listen, cli.program_addr, accounts).await
 }

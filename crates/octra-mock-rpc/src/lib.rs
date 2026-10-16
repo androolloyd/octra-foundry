@@ -4070,6 +4070,30 @@ pub async fn serve_with_chain_id(
     program_addr: String,
     chain_id: Option<String>,
 ) -> anyhow::Result<()> {
+    serve_state(addr, genesis_state(program_addr, chain_id, &[])?).await
+}
+
+/// Serve an explicitly funded mock genesis. No accounts or balances are
+/// invented by default; seeding enables the existing real admission checks.
+pub async fn serve_with_accounts(
+    addr: SocketAddr,
+    program_addr: String,
+    accounts: Vec<(String, u64)>,
+) -> anyhow::Result<()> {
+    serve_state(addr, genesis_state(program_addr, None, &accounts)?).await
+}
+
+fn genesis_state(
+    program_addr: String,
+    chain_id: Option<String>,
+    accounts: &[(String, u64)],
+) -> anyhow::Result<AppState> {
+    let mut seen = HashSet::new();
+    for (address, amount) in accounts {
+        octra_core::address::Address::try_from_display(address)?;
+        anyhow::ensure!(*amount > 0, "mock genesis balance must be positive");
+        anyhow::ensure!(seen.insert(address), "duplicate mock genesis account");
+    }
     let app = AppState {
         state: Arc::new(RwLock::new(ChainState {
             epoch: 1,
@@ -4078,6 +4102,13 @@ pub async fn serve_with_chain_id(
         program_addr,
         expected_chain_id: chain_id,
     };
+    for (address, amount) in accounts {
+        app.fund(address.clone(), *amount, None);
+    }
+    Ok(app)
+}
+
+async fn serve_state(addr: SocketAddr, app: AppState) -> anyhow::Result<()> {
     // Epochs advance on a timer, because that is the only way they
     // advance on the chain: Single mode applies staged txs from a
     // hardcoded 10-second tick (`epoch_time.ml:10-11`,
@@ -4089,8 +4120,10 @@ pub async fn serve_with_chain_id(
     let ticker = app.clone();
     let interval_ms: u64 = std::env::var("OCTRA_MOCK_EPOCH_MS")
         .ok()
-        .and_then(|v| v.parse().ok())
+        .map(|value| value.parse())
+        .transpose()?
         .unwrap_or(10_000);
+    anyhow::ensure!(interval_ms > 0, "mock epoch interval must be positive");
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
         loop {
@@ -4102,6 +4135,44 @@ pub async fn serve_with_chain_id(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod genesis_tests {
+    use super::{genesis_state, octra_balance};
+    use octra_core::{address::Address, sig::KeyPair};
+    use serde_json::json;
+
+    #[test]
+    fn explicit_genesis_enables_ledger_and_exposes_exact_funded_balance() {
+        let address = Address::from_pubkey(&KeyPair::from_secret_bytes(&[17; 32]).public.0)
+            .display()
+            .to_owned();
+        let empty = genesis_state("mock-program".into(), None, &[]).unwrap();
+        assert!(!empty.state.read().ledger_enforced);
+        assert!(octra_balance(&empty, &json!([address])).is_err());
+        let app = genesis_state("mock-program".into(), None, &[(address.clone(), 1000)]).unwrap();
+        assert!(app.state.read().ledger_enforced);
+        let balance = octra_balance(&app, &json!([address])).unwrap();
+        assert_eq!(balance["balance_raw"], "1000");
+        assert_eq!(balance["nonce"], 0);
+        assert_eq!(balance["pending_nonce"], 0);
+        assert_eq!(balance["has_public_key"], false);
+    }
+
+    #[test]
+    fn invalid_genesis_refuses_duplicate_zero_or_malformed_accounts() {
+        let address = Address::from_pubkey(&KeyPair::from_secret_bytes(&[17; 32]).public.0)
+            .display()
+            .to_owned();
+        for accounts in [
+            vec![(address.clone(), 1), (address.clone(), 2)],
+            vec![(address, 0)],
+            vec![("invalid-address".into(), 1)],
+        ] {
+            assert!(genesis_state("mock-program".into(), None, &accounts).is_err());
+        }
+    }
 }
 
 #[cfg(test)]

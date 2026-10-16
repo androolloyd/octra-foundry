@@ -4,6 +4,7 @@
 //! Synthetic artifacts are available only through explicit `--mock` builds.
 
 pub mod amlc;
+mod artifact;
 pub mod bind;
 pub mod build;
 pub mod compile;
